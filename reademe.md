@@ -49,7 +49,7 @@ Markdown
 ### 方式 A：标准官方一键安装（推荐，海外 VPS）
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/lisiyong0707/sing-box-vps/main/sing-box-vps.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/lisiyong0707/singbox/main/sb.sh)
 方式 B：国内 / 连通不畅镜像加速
 code
 Bash
