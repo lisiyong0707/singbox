@@ -8,8 +8,10 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 export LC_ALL=C
+# 兼容 sing-box 1.12+ 废弃策略字段提示
+export ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true
 
-readonly SCRIPT_VERSION="3.2.1"
+readonly SCRIPT_VERSION="3.2.2"
 readonly CONFIG_DIR="/etc/sing-box"
 readonly CONFIG_FILE="${CONFIG_DIR}/config.json"
 readonly STATE_DIR="/var/lib/sing-box-vps"
@@ -53,9 +55,9 @@ mktemp_tracked() {
   printf '%s' "$temp"
 }
 
-info() { printf "${BLUE}[i]${NC} %s\n" "$*"; }
-ok()   { printf "${GREEN}[+]${NC} %s\n" "$*"; }
-warn() { printf "${YELLOW}[!]${NC} %s\n" "$*"; }
+info() { printf "${BLUE}[i]${NC} %s\n" "$*" >&2; }
+ok()   { printf "${GREEN}[+]${NC} %s\n" "$*" >&2; }
+warn() { printf "${YELLOW}[!]${NC} %s\n" "$*" >&2; }
 die()  { printf "${RED}[x]${NC} %s\n" "$*" >&2; exit 1; }
 
 on_error() {
@@ -77,6 +79,19 @@ require_systemd() {
 
 require_apt() {
   command -v apt-get >/dev/null 2>&1 || die "当前管理系统专为 Debian / Ubuntu (APT) 环境优化。"
+}
+
+ensure_service_override() {
+  if [[ -d /etc/systemd/system ]]; then
+    install -d -m 755 /etc/systemd/system/sing-box.service.d
+    if [[ ! -f /etc/systemd/system/sing-box.service.d/override.conf ]]; then
+      tee /etc/systemd/system/sing-box.service.d/override.conf >/dev/null <<'EOF'
+[Service]
+Environment="ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true"
+EOF
+      systemctl daemon-reload 2>/dev/null || true
+    fi
+  fi
 }
 
 ensure_dirs() {
@@ -135,28 +150,7 @@ valid_hostname() {
 # ==================== 网络自适应探测与分流识别 ====================
 
 detect_strategy_field() {
-  if ! command -v sing-box >/dev/null 2>&1; then
-    printf 'network_strategy'
-    return
-  fi
-  local test_cfg
-  test_cfg=$(mktemp_tracked)
-  cat <<'EOF' > "$test_cfg"
-{
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "probe",
-      "network_strategy": "prefer_ipv6"
-    }
-  ]
-}
-EOF
-  if sing-box check -c "$test_cfg" >/dev/null 2>&1; then
-    printf 'network_strategy'
-  else
-    printf 'domain_strategy'
-  fi
+  printf 'domain_strategy'
 }
 
 check_ipv4_egress() {
@@ -234,10 +228,10 @@ get_server_flag() {
 
 ask_node_network_mode() {
   local choice
-  printf "\n选择节点监听与网络出口模式：\n"
-  printf "  1) Dual 双栈节点 (推荐: 监听 ::，出站 IPv6 优先并自适应故障回退 IPv4)\n"
-  printf "  2) IPv4 专用节点 (监听 0.0.0.0，出站强制仅经由 IPv4)\n"
-  printf "  3) IPv6 专用节点 (监听 ::，专供 IPv6 客户端或纯 IPv6 出口)\n"
+  printf "\n选择节点监听与网络出口模式：\n" >&2
+  printf "  1) Dual 双栈节点 (推荐: 监听 ::，出站 IPv6 优先并自适应故障回退 IPv4)\n" >&2
+  printf "  2) IPv4 专用节点 (监听 0.0.0.0，出站强制仅经由 IPv4)\n" >&2
+  printf "  3) IPv6 专用节点 (监听 ::，专供 IPv6 客户端或纯 IPv6 出口)\n" >&2
   read -r -p "请选择 [1]: " choice
   choice=${choice:-1}
   case "$choice" in
@@ -324,6 +318,7 @@ apply_candidate() {
   fi
 
   install -m 600 "$candidate" "$CONFIG_FILE"
+  ensure_service_override
   systemctl enable --now sing-box
 
   if ! systemctl restart sing-box; then
@@ -505,13 +500,13 @@ show_qr_and_uri() {
 
 select_reality_sni() {
   local choice custom_sni
-  printf "\n选择 Reality 握手域名（SNI 目标）:\n"
-  printf "  1) gateway.icloud.com   (Apple iCloud 核心网关, 推荐)\n"
-  printf "  2) mask.icloud.com      (Apple Private Relay 节点)\n"
-  printf "  3) www.cloudflare.com   (Cloudflare 官方主站)\n"
-  printf "  4) www.microsoft.com    (微软官方主站)\n"
-  printf "  5) dl.google.com        (Google CDN 全球节点)\n"
-  printf "  6) 自定义输入握手域名\n"
+  printf "\n选择 Reality 握手域名（SNI 目标）:\n" >&2
+  printf "  1) gateway.icloud.com   (Apple iCloud 核心网关, 推荐)\n" >&2
+  printf "  2) mask.icloud.com      (Apple Private Relay 节点)\n" >&2
+  printf "  3) www.cloudflare.com   (Cloudflare 官方主站)\n" >&2
+  printf "  4) www.microsoft.com    (微软官方主站)\n" >&2
+  printf "  5) dl.google.com        (Google CDN 全球节点)\n" >&2
+  printf "  6) 自定义输入握手域名\n" >&2
   read -r -p "请选择 [1]: " choice
   choice=${choice:-1}
   case "$choice" in
@@ -574,9 +569,9 @@ obtain_tls_paths() {
     printf '%s|%s' "$cert" "$key"
     return
   fi
-  printf "\nTLS 证书配置选项：\n"
-  printf "  1) 使用 Certbot 自动签发 Let's Encrypt (需域名解析到本机且 80 端口空闲)\n"
-  printf "  2) 手动输入服务器现有证书和私钥路径 (PEM 格式)\n"
+  printf "\nTLS 证书配置选项：\n" >&2
+  printf "  1) 使用 Certbot 自动签发 Let's Encrypt (需域名解析到本机且 80 端口空闲)\n" >&2
+  printf "  2) 手动输入服务器现有证书和私钥路径 (PEM 格式)\n" >&2
   read -r -p '选择 [1]: ' choice
   choice=${choice:-1}
   case $choice in
@@ -585,7 +580,7 @@ obtain_tls_paths() {
       apt-get update -y >&2
       apt-get install -y certbot >&2
       open_firewall_port 80 tcp >&2
-      info "正在签发域名 [${domain}] 的 SSL 证书..." >&2
+      info "正在签发域名 [${domain}] 的 SSL 证书..."
       certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email -d "$domain" >&2
       install_certbot_hook
       [[ -r $cert && -r $key ]] || die "证书申请流程结束，但在预设路径未找到 PEM 证书文件。"
@@ -688,6 +683,7 @@ Signed-By: /etc/apt/keyrings/sagernet.asc
 EOF
   apt-get update -y
   apt-get install -y sing-box
+  ensure_service_override
   ensure_base_routing
   systemctl enable sing-box
   install_manager
@@ -710,6 +706,7 @@ EOF
 ensure_installed() {
   command -v sing-box >/dev/null 2>&1 || install_sing_box
   command -v jq >/dev/null 2>&1 || install_prerequisites
+  ensure_service_override
   ensure_base_routing
 }
 
@@ -1460,7 +1457,7 @@ EOF
       cat <<EOF >> "$yaml_file"
   - name: "${tag}"
     type: vless
-    server: ${host}
+    server: "${host}"
     port: ${port}
     uuid: $(jq -r '.uuid' <<<"$meta")
     cipher: none
@@ -1484,7 +1481,7 @@ EOF
       cat <<EOF >> "$yaml_file"
   - name: "${tag}"
     type: ss
-    server: ${host}
+    server: "${host}"
     port: ${port}
     cipher: 2022-blake3-aes-128-gcm
     password: $(jq -r '.ss_key' <<<"$meta")
@@ -1499,7 +1496,7 @@ EOF
       cat <<EOF >> "$yaml_file"
   - name: "${tag}"
     type: ss
-    server: ${host}
+    server: "${host}"
     port: ${port}
     cipher: 2022-blake3-aes-128-gcm
     password: $(jq -r '.password' <<<"$meta")
@@ -1509,7 +1506,7 @@ EOF
       cat <<EOF >> "$yaml_file"
   - name: "${tag}"
     type: trojan
-    server: ${host}
+    server: "${host}"
     port: ${port}
     password: $(jq -r '.password' <<<"$meta")
     sni: $(jq -r '.sni' <<<"$meta")
@@ -1520,7 +1517,7 @@ EOF
       cat <<EOF >> "$yaml_file"
   - name: "${tag}"
     type: vless
-    server: ${host}
+    server: "${host}"
     port: ${port}
     uuid: $(jq -r '.uuid' <<<"$meta")
     cipher: none
@@ -1533,7 +1530,7 @@ EOF
       cat <<EOF >> "$yaml_file"
   - name: "${tag}"
     type: vless
-    server: ${host}
+    server: "${host}"
     port: 443
     uuid: $(jq -r '.uuid' <<<"$meta")
     cipher: none
@@ -1550,7 +1547,7 @@ EOF
       cat <<EOF >> "$yaml_file"
   - name: "${tag}"
     type: hysteria2
-    server: ${host}
+    server: "${host}"
     port: ${port}
     password: $(jq -r '.password' <<<"$meta")
     sni: $(jq -r '.sni' <<<"$meta")
@@ -1562,7 +1559,7 @@ EOF
       cat <<EOF >> "$yaml_file"
   - name: "${tag}"
     type: tuic
-    server: ${host}
+    server: "${host}"
     port: ${port}
     uuid: $(jq -r '.uuid' <<<"$meta")
     password: $(jq -r '.password' <<<"$meta")
@@ -2019,7 +2016,6 @@ show_status() {
   printf "\n${CYAN}======================= sing-box 服务与网络拓扑概览 =======================${NC}\n"
   printf "核心版本: "
   sing-box version | head -n 1
-  printf "出站分流策略关键字: %s\n" "$(detect_strategy_field)"
   printf "宿主机网络栈状态:   %s\n" "$net_type"
   printf "公网 IPv4:          %s\n" "${public_ipv4:-未检测到}"
   printf "公网 IPv6:          %s\n" "${public_ipv6:-未检测到}"
