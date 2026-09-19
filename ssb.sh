@@ -444,6 +444,10 @@ ensure_installed() {
   command -v jq >/dev/null 2>&1 || install_prerequisites
   check_sing_box_min_version || true
   ensure_base_routing
+  # 只要发现系统里没有 sb 命令，就自动创建
+  if [[ ! -f /usr/local/bin/sb ]]; then
+    install_manager
+  fi
 }
 
 create_base_config() {
