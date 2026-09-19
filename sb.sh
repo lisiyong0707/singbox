@@ -615,12 +615,11 @@ new_uuid()       { sing-box generate uuid 2>/dev/null || cat /proc/sys/kernel/ra
 generate_reality_keypair() {
   local keypair private_key public_key
   keypair=$(sing-box generate reality-keypair)
-  private_key=$(awk -F': ' '/PrivateKey/ {print $2}' <<<"$keypair")
-  public_key=$(awk -F': ' '/PublicKey/ {print $2}' <<<"$keypair")
+  private_key=$(awk -F': ' '/PrivateKey/ {print $2}' <<<"$keypair" | tr -d '[:space:]')
+  public_key=$(awk -F': ' '/PublicKey/ {print $2}' <<<"$keypair" | tr -d '[:space:]')
   [[ -n $private_key && -n $public_key ]] || die "无法生成 Reality 密钥对。"
   printf '%s|%s' "$private_key" "$public_key"
 }
-
 # Reality 握手域名: 内置推荐列表 + 自定义, 并做连通性/TLS1.3 粗校验
 ask_reality_handshake_domain() {
   local i choice domain
@@ -872,7 +871,7 @@ deploy_vless_reality_unified() {
 
   reality=$(jq -n --arg handshake "$handshake" --arg private_key "$private_key" --arg short_id "$short_id" \
     '{enabled:true,handshake:{server:$handshake,server_port:443},private_key:$private_key,short_id:[$short_id]}')
-  tls=$(jq -n --argjson reality "$reality" '{enabled:true,reality:$reality}')
+  tls=$(jq -n --arg hs "$handshake" --argjson reality "$reality" '{enabled:true,server_name:$hs,reality:$reality}')
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg uuid "$uuid" --argjson tls "$tls" \
     '{type:"vless",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",uuid:$uuid,flow:"xtls-rprx-vision"}],tls:$tls}')
 
@@ -899,7 +898,7 @@ deploy_vless_reality_grpc() {
 
   reality=$(jq -n --arg handshake "$handshake" --arg private_key "$private_key" --arg short_id "$short_id" \
     '{enabled:true,handshake:{server:$handshake,server_port:443},private_key:$private_key,short_id:[$short_id]}')
-  tls=$(jq -n --argjson reality "$reality" '{enabled:true,reality:$reality}')
+  tls=$(jq -n --arg hs "$handshake" --argjson reality "$reality" '{enabled:true,server_name:$hs,reality:$reality}')
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg uuid "$uuid" --arg svc "$service_name" --argjson tls "$tls" \
     '{type:"vless",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",uuid:$uuid}],tls:$tls,transport:{type:"grpc",service_name:$svc}}')
 
