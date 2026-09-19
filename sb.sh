@@ -25,7 +25,7 @@ umask 077
 # 常量
 # ---------------------------------------------------------------------------
 readonly SCRIPT_VERSION="3.0.0"
-readonly SB_MIN_VERSION="1.9.0"
+readonly SB_MIN_VERSION="1.12.0"
 
 readonly CONFIG_DIR="/etc/sing-box"
 readonly CONFIG_FILE="${CONFIG_DIR}/config.json"
@@ -289,21 +289,27 @@ get_server_flag() {
   fi
 }
 
-# sing-box 1.9 起 domain_strategy -> network_strategy 迁移(部分出站字段), 自动探测生效字段名
-detect_strategy_field() {
-  command -v sing-box >/dev/null 2>&1 || { printf 'network_strategy'; return; }
-  local test_cfg
-  test_cfg=$(mktemp)
-  cat <<'EOF' > "$test_cfg"
-{"outbounds":[{"type":"direct","tag":"probe","network_strategy":"prefer_ipv6"}]}
-EOF
-  if sing-box check -c "$test_cfg" >/dev/null 2>&1; then
-    printf 'network_strategy'
-  else
-    printf 'domain_strategy'
-  fi
-  rm -f "$test_cfg"
+# sing-box outbound 层的 IP 版本策略字段几经变迁:
+#   - 1.11 之前: 出站字段 domain_strategy (prefer_ipv4/prefer_ipv6/ipv4_only/ipv6_only)
+#   - 1.12 起: domain_strategy 标记为废弃, 替换为 domain_resolver (引用 dns.servers 中的
+#     一个 server tag, 并可选带 strategy), network_strategy 是完全不同的字段
+#     (仅用于 Android/Apple 图形客户端的多网络接口选路, 与 IPv4/IPv6 偏好无关)
+#   - 1.14 起: domain_strategy 若未设置环境变量 ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS
+#     会直接校验失败
+# 因此本脚本统一采用 domain_resolver + 一个内置 DNS server 的现代方案, 不再探测/使用
+# network_strategy 或 domain_strategy 字段。
+readonly SB_DNS_RESOLVER_TAG="dns-direct"
+
+ensure_dns_resolver() {
+  # 确保配置里存在一个可供 domain_resolver 引用的 DNS server
+  atomic_json_update "$CONFIG_FILE" '
+    if .dns == null then .dns = {servers: []} else . end |
+    if (.dns.servers | map(select(.tag == $tag)) | length) == 0 then
+      .dns.servers += [{type:"udp", tag:$tag, server:"1.1.1.1"}]
+    else . end
+  ' --arg tag "$SB_DNS_RESOLVER_TAG" || true
 }
+
 
 ask_node_network_mode() {
   local stack choice
@@ -444,18 +450,18 @@ create_base_config() {
   [[ -f $CONFIG_FILE ]] && return 0
   ensure_dirs
   info "初始化包含 IPv4/IPv6 出站策略的基础配置"
-  local strat_key candidate
-  strat_key=$(detect_strategy_field)
+  local candidate
   candidate=$(mktemp)
-  jq -n --arg strat "$strat_key" '{
+  jq -n --arg dns_tag "$SB_DNS_RESOLVER_TAG" '{
     "$schema": "https://sing-box.sagernet.org/schema.json",
     log: { level: "info", timestamp: true },
+    dns: { servers: [ { type: "udp", tag: $dns_tag, server: "1.1.1.1" } ] },
     inbounds: [],
     outbounds: [
       { type: "direct", tag: "direct" },
-      { type: "direct", tag: "direct-v4", ($strat): "ipv4_only" },
-      { type: "direct", tag: "direct-v6", ($strat): "prefer_ipv6" },
-      { type: "direct", tag: "direct-dual", ($strat): "prefer_ipv6" },
+      { type: "direct", tag: "direct-v4", domain_resolver: { server: $dns_tag, strategy: "ipv4_only" } },
+      { type: "direct", tag: "direct-v6", domain_resolver: { server: $dns_tag, strategy: "prefer_ipv6" } },
+      { type: "direct", tag: "direct-dual", domain_resolver: { server: $dns_tag, strategy: "prefer_ipv6" } },
       { type: "block", tag: "block" }
     ],
     route: { rules: [], final: "direct" }
@@ -468,20 +474,19 @@ create_base_config() {
 ensure_base_routing() {
   ensure_dirs
   create_base_config
-  local strat_key
-  strat_key=$(detect_strategy_field)
+  ensure_dns_resolver
   atomic_json_update "$CONFIG_FILE" '
     if (.outbounds | map(select(.tag == "direct-v4")) | length) == 0 then
-      .outbounds += [{"type": "direct", "tag": "direct-v4", ($strat): "ipv4_only"}]
+      .outbounds += [{"type": "direct", "tag": "direct-v4", "domain_resolver": {"server": $dns_tag, "strategy": "ipv4_only"}}]
     else . end |
     if (.outbounds | map(select(.tag == "direct-v6")) | length) == 0 then
-      .outbounds += [{"type": "direct", "tag": "direct-v6", ($strat): "prefer_ipv6"}]
+      .outbounds += [{"type": "direct", "tag": "direct-v6", "domain_resolver": {"server": $dns_tag, "strategy": "prefer_ipv6"}}]
     else . end |
     if (.outbounds | map(select(.tag == "direct-dual")) | length) == 0 then
-      .outbounds += [{"type": "direct", "tag": "direct-dual", ($strat): "prefer_ipv6"}]
+      .outbounds += [{"type": "direct", "tag": "direct-dual", "domain_resolver": {"server": $dns_tag, "strategy": "prefer_ipv6"}}]
     else . end |
     if .route.rules == null then .route.rules = [] else . end
-  ' --arg strat "$strat_key" || true
+  ' --arg dns_tag "$SB_DNS_RESOLVER_TAG" || true
 }
 # ---------------------------------------------------------------------------
 # 配置备份
@@ -1015,7 +1020,7 @@ deploy_hysteria2() {
 
   tls=$(tls_json "$D_HOST" "$cert" "$key")
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg password "$password" --arg obfs "$obfs_password" --argjson tls "$tls" \
-    '{type:"hysteria2",tag:$tag,listen:$listen,listen_port:$port,network:"udp",users:[{name:"default",password:$password}],obfs:{type:"salamander",password:$obfs},tls:$tls}')
+    '{type:"hysteria2",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",password:$password}],obfs:{type:"salamander",password:$obfs},tls:$tls}')
   apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
 
   flag=$(get_server_flag)
@@ -1038,7 +1043,7 @@ deploy_tuic() {
 
   tls=$(tls_json "$D_HOST" "$cert" "$key")
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg uuid "$uuid" --arg password "$password" --argjson tls "$tls" \
-    '{type:"tuic",tag:$tag,listen:$listen,listen_port:$port,network:"udp",users:[{name:"default",uuid:$uuid,password:$password}],congestion_control:"bbr",zero_rtt_handshake:false,tls:$tls}')
+    '{type:"tuic",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",uuid:$uuid,password:$password}],congestion_control:"bbr",zero_rtt_handshake:false,tls:$tls}')
   apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
 
   flag=$(get_server_flag)
@@ -1891,7 +1896,7 @@ show_status() {
   public_ipv4=$(detect_public_ip || true)
   public_ipv6=$(detect_public_ipv6 || true)
   printf '\nsing-box 版本: '; sing-box version | head -n 1
-  printf '出口策略生效字段: %s\n' "$(detect_strategy_field)"
+  printf '出站 IP 版本策略: domain_resolver (dns tag: %s)\n' "$SB_DNS_RESOLVER_TAG"
   printf '网络栈判定: %s\n' "$stack"
   printf '外网栈连通性: IPv4 [%s] | IPv6 [%s]\n' "$v4_status" "$v6_status"
   printf '公网 IPv4: %s\n' "${public_ipv4:-未检测到}"
@@ -1920,7 +1925,7 @@ health_check() {
     warp-cli --accept-tos status 2>/dev/null | grep -qi Connected && printf '已连接\n' || { printf '未连接\n'; failed=1; }
   fi
   printf '\n出站规则列表:\n'
-  jq -r '.outbounds[]? | "- \(.tag) [\(.type)] 策略字段: \(.network_strategy // .domain_strategy // "默认")"' "$CONFIG_FILE"
+  jq -r '.outbounds[]? | "- \(.tag) [\(.type)] domain_resolver 策略: \(.domain_resolver.strategy // "默认")"' "$CONFIG_FILE"
   if (( failed == 0 )); then ok "各项健康检查正常"; else warn "健康检查发现异常, 请运行 'sb logs' 或 'sb diag' 排查。"; fi
 }
 
