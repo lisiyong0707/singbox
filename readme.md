@@ -48,18 +48,19 @@ Markdown
 
 ### 方式 A：标准官方一键安装（推荐，海外 VPS）
 
-```bash
+```
 bash <(curl -fsSL https://raw.githubusercontent.com/lisiyong0707/singbox/main/sb.sh)
-方式 B：国内 / 连通不畅镜像加速
+```
+### 方式 B：国内 / 连通不畅镜像加速
 code
-Bash
+
 bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/lisiyong0707/sing-box-vps/main/sing-box-vps.sh)
-方式 C：纯 IPv6 专属 VPS 安装
+###方式 C：纯 IPv6 专属 VPS 安装
 code
-Bash
+
 curl -fsSL -6 https://raw.githubusercontent.com/lisiyong0707/sing-box-vps/main/sing-box-vps.sh -o /usr/local/sbin/sing-box-vps && chmod +x /usr/local/sbin/sing-box-vps && ln -sf /usr/local/sbin/sing-box-vps /usr/local/bin/sb && sb
 快捷唤醒：安装完毕后，在服务器任意目录直接输入 sb 即可打开控制台。
-🎯 协议矩阵与场景选型指南
+## 🎯 协议矩阵与场景选型指南
 针对不同的网络链路、机房环境与封锁强度，脚本内置了经过参数调优的完备入站协议：
 code
 Code
@@ -79,7 +80,7 @@ Hysteria2 (Hy2)	单流拥塞丢包反冲，BBR 自适应加速	UDP QUIC (Salaman
 TUIC v5	原生零 RTT 握手，超低延迟建连	UDP QUIC (BBR)	多连接频繁发起的场景，轻量顺滑
 Cloudflare Tunnel	无需暴露 VPS 真实公网 IP 与端口	HTTP/WS -> Argo 隧道	拯救被墙 IP、NAT 共享 IP 服务器、无独立端口机器
 Shadowsocks 2022	现代高效对称加密，低 CPU 占用	2022-blake3-aes-128	软路由主路由高性能直通、省电省算力
-🏗️ 核心架构与工程设计
+## 🏗️ 核心架构与工程设计
 1. 原子配置写入与失败秒级自愈
 code
 Code
@@ -98,7 +99,7 @@ Code
                        │                                 │
                  direct 出口                        warp-out 出口
             (宿主机 IPv4/IPv6 出口)               (WireGuard 到 Cloudflare)
-💻 命令行 CLI 自动化速查
+## 💻 命令行 CLI 自动化速查
 除了交互式控制台，支持通过参数静默调用，便于集成与批量维护：
 code
 Bash
@@ -135,7 +136,7 @@ sb remove            # 删除指定节点（级联清理附属 detour 及路由�
 sb upgrade           # 从官方源升级 sing-box 核心二进制
 sb self-update       # 从 GitHub 拉取升级本管理脚本
 sb uninstall         # 彻底卸载 sing-box（保留配置数据）
-📱 客户端订阅与配置使用
+## 📱 客户端订阅与配置使用
 脚本内部集成全功能订阅引擎，路径保存在 /var/lib/sing-box-vps/subscriptions/：
 1. 通用客户端 (Shadowrocket / v2rayN / Loon / Quantumult X)
 部署节点后，终端会直接渲染 ANSI-UTF8 二维码，打开手机扫码即可直接录入。
@@ -146,7 +147,7 @@ sb uninstall         # 彻底卸载 sing-box（保留配置数据）
 3. sing-box 官方客户端
 自动拼接开箱即用的完整 profile，包含完整的本地 Inbound（Mixed 2080 端口）、Selector 分流规则及全部已生成的实际 Outbound 实体。
 配置文件位置：/var/lib/sing-box-vps/subscriptions/singbox.json。
-🩺 9 维全生命周期诊断系统
+## 🩺 9 维全生命周期诊断系统
 运行 sb diag 命令，对节点服务进行秒级健康体检：
 code
 Text
@@ -161,17 +162,17 @@ TCP 拥塞算法                 BBR 活跃生效       当前内核算法: bbr
 Cloudflare Tunnel            常驻运行           隧道服务正常通信
 sing-box 语法校验            通过               JSON 架构合法且出站对齐
 sing-box 进程状态            运行中             Active (running)
-❓ 常见问题排查 (FAQ)
-Q1: 节点配置完成后，客户端无法连接超时？
+## ❓ 常见问题排查 (FAQ)
+### Q1: 节点配置完成后，客户端无法连接超时？
 云服务商安全组：Oracle Cloud（甲骨文）、AWS、阿里云、腾讯云等均有独立的网页端网络安全组/子网防火墙。仅在 Linux 本地开放端口无效，必须登录网页控制台放行对应的 TCP/UDP 端口。
 UDP 阻断：若部署了 Hysteria2 或 TUIC，请确保云服务商安全组同时放行了 UDP 端口。部分校园网或公司网络限制了 UDP 流量，此时可切换为 VLESS Reality TCP 模式。
-Q2: Let's Encrypt 证书申请失败？
+### Q2: Let's Encrypt 证书申请失败？
 确认待申请的域名解析（A / AAAA 记录）已经正确生效并指向当前服务器公网 IP。
 确保服务器 80 端口 未被 Nginx、Caddy 或 Apache 等 Web 服务抢占（脚本会自动检查 80 端口状态）。若被占用，可选择选项输入已有 PEM 证书路径。
-Q3: 纯 IPv6 (IPv6-Only) VPS 能够使用该脚本吗？
+### Q3: 纯 IPv6 (IPv6-Only) VPS 能够使用该脚本吗？
 完全支持。脚本内部已做好 IPv4/IPv6 自适应判断。
 注意：部分纯 IPv6 机器没有提供公共 NAT64/DNS64 访问外界，会导致拉取 GitHub 软件源失败。请在安装前配置公共 DNS64（例如 /etc/resolv.conf 中追加 nameserver 2001:67c:2b0::4）。
-📂 运行时目录架构
+## 📂 运行时目录架构
 code
 Text
 /etc/sing-box/
@@ -190,6 +191,6 @@ Text
 /etc/cloudflared/
   ├── config.yml                      # 本地 Ingress 规则映射
   └── token.txt                       # Tunnel Token 离线脱机备份 (用于自愈修复)
-⚖️ 开源协议与免责声明
+## ⚖️ 开源协议与免责声明
 本项目基于 GPL-3.0 License 开放源代码。
 本脚本仅作为系统网络运维工具及开源技术交流使用，请在符合所在地法律法规及服务商 ToS 约定的前提下进行测试学习。使用者需自行对使用行为及产生的网络流量合规性负责。
