@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================================
 # sing-box-vps :: 生产级 sing-box VPS 双栈智能管理脚本
-# Repository : https://github.com/lisiyong0707/sing-box-vps
+# Repository : https://github.com/lisiyong0707/singbox
 #
 # 功能总览:
 #   VLESS Reality / Reality gRPC / ShadowTLS v3+SS2022 / Shadowsocks 2022 /
