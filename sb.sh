@@ -487,16 +487,22 @@ create_base_config() {
   jq -n --arg dns_tag "$SB_DNS_RESOLVER_TAG" '{
     "$schema": "https://sing-box.sagernet.org/schema.json",
     log: { level: "info", timestamp: true },
-    dns: { servers: [ { type: "udp", tag: $dns_tag, address: "1.1.1.1" } ] },
+    dns: {
+      servers: [
+        { type: "udp", tag: "dns-direct", address: "1.1.1.1" },
+        { type: "udp", tag: "dns-v4", address: "1.1.1.1", strategy: "ipv4_only" },
+        { type: "udp", tag: "dns-v6", address: "1.1.1.1", strategy: "prefer_ipv6" }
+      ]
+    },
     inbounds: [],
     outbounds: [
       { type: "direct", tag: "direct" },
-      { type: "direct", tag: "direct-v4", domain_resolver: { server: $dns_tag, strategy: "ipv4_only" } },
-      { type: "direct", tag: "direct-v6", domain_resolver: { server: $dns_tag, strategy: "prefer_ipv6" } },
-      { type: "direct", tag: "direct-dual", domain_resolver: { server: $dns_tag, strategy: "prefer_ipv6" } },
+      { type: "direct", tag: "direct-v4", domain_resolver: "dns-v4" },
+      { type: "direct", tag: "direct-v6", domain_resolver: "dns-v6" },
+      { type: "direct", tag: "direct-dual", domain_resolver: "dns-direct" },
       { type: "block", tag: "block" }
     ],
-    route: { rules: [], final: "direct", default_domain_resolver: $dns_tag }
+    route: { rules: [], final: "direct", default_domain_resolver: "dns-direct" }
   }' > "$candidate"
   json_validate "$candidate" || die "内部错误: 基础配置生成失败。"
   atomic_install "$candidate" "$CONFIG_FILE" 600
@@ -506,20 +512,6 @@ create_base_config() {
 ensure_base_routing() {
   ensure_dirs
   create_base_config
-  ensure_dns_resolver
-  atomic_json_update "$CONFIG_FILE" '
-    if (.outbounds | map(select(.tag == "direct-v4")) | length) == 0 then
-      .outbounds += [{"type": "direct", "tag": "direct-v4", "domain_resolver": {"server": $dns_tag, "strategy": "ipv4_only"}}]
-    else . end |
-    if (.outbounds | map(select(.tag == "direct-v6")) | length) == 0 then
-      .outbounds += [{"type": "direct", "tag": "direct-v6", "domain_resolver": {"server": $dns_tag, "strategy": "prefer_ipv6"}}]
-    else . end |
-    if (.outbounds | map(select(.tag == "direct-dual")) | length) == 0 then
-      .outbounds += [{"type": "direct", "tag": "direct-dual", "domain_resolver": {"server": $dns_tag, "strategy": "prefer_ipv6"}}]
-    else . end |
-    if .route.rules == null then .route.rules = [] else . end |
-    .route.default_domain_resolver = $dns_tag
-  ' --arg dns_tag "$SB_DNS_RESOLVER_TAG" || true
 }
 # ---------------------------------------------------------------------------
 # 配置备份
