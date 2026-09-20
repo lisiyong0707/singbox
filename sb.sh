@@ -325,7 +325,7 @@ ensure_dns_resolver() {
   atomic_json_update "$CONFIG_FILE" '
     if .dns == null then .dns = {servers: []} else . end |
     if (.dns.servers | map(select(.tag == $tag)) | length) == 0 then
-      .dns.servers += [{type:"udp", tag:$tag, address:"1.1.1.1"}]
+      .dns.servers += [{type:"udp", tag:$tag, server:"1.1.1.1"}]
     else . end
   ' --arg tag "$SB_DNS_RESOLVER_TAG" || true
 }
@@ -489,7 +489,7 @@ create_base_config() {
     log: { level: "info", timestamp: true },
     dns: {
       servers: [
-        { type: "udp", tag: "dns-direct", address: "1.1.1.1" },
+        { type: "udp", tag: "dns-direct",address: "1.1.1.1" },
         { type: "udp", tag: "dns-v4", address: "1.1.1.1", strategy: "ipv4_only" },
         { type: "udp", tag: "dns-v6", address: "1.1.1.1", strategy: "prefer_ipv6" }
       ]
