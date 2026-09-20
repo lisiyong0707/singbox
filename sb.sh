@@ -484,23 +484,22 @@ create_base_config() {
   info "初始化包含 IPv4/IPv6 出站策略的基础配置"
   local candidate
   candidate=$(mktemp)
-  jq -n --arg dns_tag "$SB_DNS_RESOLVER_TAG" '{
-    "$schema": "https://sing-box.sagernet.org/schema.json",
+    jq -n '{
     log: { level: "info", timestamp: true },
     dns: {
       servers: [
-        { type: "udp", tag: "dns-direct",server: "1.1.1.1" },
-        { type: "udp", tag: "dns-v4", server: "1.1.1.1", strategy: "ipv4_only" },
-        { type: "udp", tag: "dns-v6", server: "1.1.1.1", strategy: "prefer_ipv6" }
+        { type: "udp", tag: "dns-direct", server: "1.1.1.1" }
       ]
     },
     inbounds: [],
     outbounds: [
       { type: "direct", tag: "direct" },
-      { type: "direct", tag: "direct-v4", domain_resolver: "dns-v4" },
-      { type: "direct", tag: "direct-v6", domain_resolver: "dns-v6" },
-      { type: "direct", tag: "direct-dual", domain_resolver: "dns-direct" },
-      { type: "block", tag: "block" }
+      { type: "direct", tag: "direct-v4",
+        domain_resolver: { server: "dns-direct", strategy: "ipv4_only" } },
+      { type: "direct", tag: "direct-v6",
+        domain_resolver: { server: "dns-direct", strategy: "prefer_ipv6" } },
+      { type: "direct", tag: "direct-dual",
+        domain_resolver: { server: "dns-direct", strategy: "prefer_ipv6" } }
     ],
     route: { rules: [], final: "direct", default_domain_resolver: "dns-direct" }
   }' > "$candidate"
@@ -531,7 +530,7 @@ backup_config() {
 apply_candidate() {
   local candidate=$1
   json_validate "$candidate" || die "候选配置 JSON 语法非法, 已拒绝写入。"
-  if ! sing-box check -c "$candidate" 2>>"$LOG_FILE"; then
+  if ! sing-box check -c "$candidate" 2>&1 | tee -a "$LOG_FILE"; then
     die "候选配置未通过 sing-box check 校验, 已拒绝写入, 详见 ${LOG_FILE}。"
   fi
   backup_config
@@ -540,6 +539,10 @@ apply_candidate() {
     | sort -nr | head -n1 | cut -d' ' -f2-)
 
   atomic_install "$candidate" "$CONFIG_FILE" 600
+  if getent group sing-box >/dev/null 2>&1; then
+  chgrp sing-box "$CONFIG_DIR" "$CONFIG_FILE" && chmod 750 "$CONFIG_DIR" && chmod 640 "$CONFIG_FILE"
+fi
+
   systemctl enable --now sing-box >/dev/null 2>&1 || true
   if ! systemctl restart sing-box; then
     warn "sing-box 重启失败, 正在自动回滚到上一份可用配置..."
@@ -606,7 +609,7 @@ apply_inbound_with_route() {
   candidate=$(mktemp)
   jq --argjson inbound "$inbound_json" --arg tag "$tag" --arg outbound "$outbound_tag" '
     .inbounds += [$inbound] |
-    .route.rules += [{"inbound": [$tag], "outbound": $outbound}]
+    .route.rules += [{"inbound": [$tag], "action": "route", "outbound": $outbound}]
   ' "$CONFIG_FILE" > "$candidate"
   apply_candidate "$candidate"
   rm -f "$candidate"
@@ -1015,7 +1018,7 @@ deploy_shadowtls_ss2022() {
   candidate=$(mktemp)
   jq --argjson inb_st "$inbound_st" --argjson inb_ss "$inbound_ss" --arg tag "$D_TAG" --arg outbound "$D_OUTBOUND" '
     .inbounds += [$inb_st, $inb_ss] |
-    .route.rules += [{"inbound": [$tag], "outbound": $outbound}]
+    .route.rules += [{"inbound": [$tag], "action": "route", "outbound": $outbound}]
   ' "$CONFIG_FILE" > "$candidate"
   apply_candidate "$candidate"
   rm -f "$candidate"
@@ -1443,8 +1446,7 @@ uninstall_warp() {
   confirm "确认卸载 WARP 客户端并移除其 sing-box 出站" N || return 0
   systemctl disable --now warp-svc 2>/dev/null || true
   apt-get remove -y -qq cloudflare-warp 2>/dev/null || true
-  atomic_json_update "$CONFIG_FILE" --arg tag "$WARP_OUTBOUND_TAG" \
-    '.outbounds |= map(select(.tag != $tag))' || true
+  atomic_json_update "$CONFIG_FILE" '.outbounds |= map(select(.tag != $tag))' --arg tag "$WARP_OUTBOUND_TAG" || true
   systemctl restart sing-box 2>/dev/null || true
   ok "WARP 已卸载。"
 }
