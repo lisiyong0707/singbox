@@ -957,7 +957,7 @@ deploy_vless_reality_unified() {
 
   reality=$(jq -n --arg handshake "$handshake" --arg private_key "$private_key" --arg short_id "$short_id" \
     '{enabled:true,handshake:{server:$handshake,server_port:443},private_key:$private_key,short_id:[$short_id]}')
-  tls=$(jq -n --argjson reality "$reality" '{enabled:true,reality:$reality}')
+  tls=$(jq -n --arg handshake "$handshake" --argjson reality "$reality" '{enabled:true,server_name:$handshake,reality:$reality}')
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg uuid "$uuid" --argjson tls "$tls" \
     '{type:"vless",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",uuid:$uuid,flow:"xtls-rprx-vision"}],tls:$tls}')
 
@@ -984,7 +984,7 @@ deploy_vless_reality_grpc() {
 
   reality=$(jq -n --arg handshake "$handshake" --arg private_key "$private_key" --arg short_id "$short_id" \
     '{enabled:true,handshake:{server:$handshake,server_port:443},private_key:$private_key,short_id:[$short_id]}')
-  tls=$(jq -n --argjson reality "$reality" '{enabled:true,reality:$reality}')
+  tls=$(jq -n --arg handshake "$handshake" --argjson reality "$reality" '{enabled:true,server_name:$handshake,reality:$reality}')
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg uuid "$uuid" --arg svc "$service_name" --argjson tls "$tls" \
     '{type:"vless",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",uuid:$uuid}],tls:$tls,transport:{type:"grpc",service_name:$svc}}')
 
