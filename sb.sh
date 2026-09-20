@@ -496,7 +496,7 @@ create_base_config() {
       { type: "direct", tag: "direct-dual", domain_resolver: { server: $dns_tag, strategy: "prefer_ipv6" } },
       { type: "block", tag: "block" }
     ],
-    route: { rules: [], final: "direct" }
+    route: { rules: [], final: "direct", default_domain_resolver: $dns_tag }
   }' > "$candidate"
   json_validate "$candidate" || die "内部错误: 基础配置生成失败。"
   atomic_install "$candidate" "$CONFIG_FILE" 600
@@ -517,7 +517,8 @@ ensure_base_routing() {
     if (.outbounds | map(select(.tag == "direct-dual")) | length) == 0 then
       .outbounds += [{"type": "direct", "tag": "direct-dual", "domain_resolver": {"server": $dns_tag, "strategy": "prefer_ipv6"}}]
     else . end |
-    if .route.rules == null then .route.rules = [] else . end
+    if .route.rules == null then .route.rules = [] else . end |
+    .route.default_domain_resolver = $dns_tag
   ' --arg dns_tag "$SB_DNS_RESOLVER_TAG" || true
 }
 # ---------------------------------------------------------------------------
