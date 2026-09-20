@@ -15,7 +15,24 @@ Markdown
   <b>面向 Linux VPS 的现代化、模块化、高可用 sing-box 一键部署管理套件</b><br>
   原子级写入保障 · 进程崩溃自动快照回滚 · 纯原生 WARP 链式分流 · 全协议双客户端订阅导出
 </p>
+## ⚡ 一键快速安装
 
+### 方式 A：标准官方一键安装（推荐，海外 VPS）
+```
+bash <(curl -fsSL https://raw.githubusercontent.com/lisiyong0707/singbox/main/sbsb.sh)
+```
+```
+bash <(curl -fsSL https://raw.githubusercontent.com/lisiyong0707/singbox/main/sb.sh)
+```
+### 方式 B：国内 / 连通不畅镜像加速
+code
+
+bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/lisiyong0707/sing-box-vps/main/sing-box-vps.sh)
+###方式 C：纯 IPv6 专属 VPS 安装
+code
+
+curl -fsSL -6 https://raw.githubusercontent.com/lisiyong0707/sing-box-vps/main/sing-box-vps.sh -o /usr/local/sbin/sing-box-vps && chmod +x /usr/local/sbin/sing-box-vps && ln -sf /usr/local/sbin/sing-box-vps /usr/local/bin/sb && sb
+快捷唤醒：安装完毕后，在服务器任意目录直接输入 sb 即可打开控制台。
 ---
 
 ## 📑 目录
@@ -44,22 +61,7 @@ Markdown
 
 ---
 
-## ⚡ 一键快速安装
 
-### 方式 A：标准官方一键安装（推荐，海外 VPS）
-
-```
-bash <(curl -fsSL https://raw.githubusercontent.com/lisiyong0707/singbox/main/sb.sh)
-```
-### 方式 B：国内 / 连通不畅镜像加速
-code
-
-bash <(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/lisiyong0707/sing-box-vps/main/sing-box-vps.sh)
-###方式 C：纯 IPv6 专属 VPS 安装
-code
-
-curl -fsSL -6 https://raw.githubusercontent.com/lisiyong0707/sing-box-vps/main/sing-box-vps.sh -o /usr/local/sbin/sing-box-vps && chmod +x /usr/local/sbin/sing-box-vps && ln -sf /usr/local/sbin/sing-box-vps /usr/local/bin/sb && sb
-快捷唤醒：安装完毕后，在服务器任意目录直接输入 sb 即可打开控制台。
 ## 🎯 协议矩阵与场景选型指南
 针对不同的网络链路、机房环境与封锁强度，脚本内置了经过参数调优的完备入站协议：
 code
