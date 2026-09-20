@@ -489,9 +489,9 @@ create_base_config() {
     log: { level: "info", timestamp: true },
     dns: {
       servers: [
-        { type: "udp", tag: "dns-direct",address: "1.1.1.1" },
-        { type: "udp", tag: "dns-v4", address: "1.1.1.1", strategy: "ipv4_only" },
-        { type: "udp", tag: "dns-v6", address: "1.1.1.1", strategy: "prefer_ipv6" }
+        { type: "udp", tag: "dns-direct",server: "1.1.1.1" },
+        { type: "udp", tag: "dns-v4", server: "1.1.1.1", strategy: "ipv4_only" },
+        { type: "udp", tag: "dns-v6", server: "1.1.1.1", strategy: "prefer_ipv6" }
       ]
     },
     inbounds: [],
