@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# sing-box-vps :: 生产级 sing-box VPS 双栈智能管理脚本
+# sing-box-vps :: 小李的singbox VPS ai双栈智能管理脚本0.0.0
 # Repository : https://github.com/lisiyong0707/singbox
 #
 # 功能总览:
