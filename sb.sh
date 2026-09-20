@@ -44,6 +44,8 @@ readonly CERT_HOOK="/etc/letsencrypt/renewal-hooks/deploy/restart-sing-box"
 readonly MANAGER_PATH="/usr/local/sbin/sing-box-vps"
 readonly SHORTCUT_PATH="/usr/local/bin/sb"
 readonly SUB_HTTPD_UNIT="/etc/systemd/system/sing-box-vps-sub.service"
+readonly LOCK_FILE="/run/sing-box-vps.lock"
+readonly LOGROTATE_FILE="/etc/logrotate.d/sing-box-vps"
 
 SCRIPT_UPDATE_URL="${SCRIPT_UPDATE_URL:-https://raw.githubusercontent.com/lisiyong0707/singbox/main/sb.sh}"
 
@@ -104,6 +106,24 @@ ensure_dirs() {
     chmod 600 "$STATE_FILE"
   fi
   [[ -f $LOG_FILE ]] || { : > "$LOG_FILE"; chmod 600 "$LOG_FILE"; }
+  ensure_logrotate
+}
+
+ensure_logrotate() {
+  # 脚本自身的操作日志 (非 sing-box 服务日志, 那部分已由 systemd-journald 管理) 需要
+  # 自行轮转, 否则长期运行会无限增长
+  [[ -f $LOGROTATE_FILE ]] && return 0
+  command -v logrotate >/dev/null 2>&1 || return 0
+  tee "$LOGROTATE_FILE" >/dev/null <<EOF
+${LOG_FILE} {
+  weekly
+  rotate 8
+  compress
+  missingok
+  notifempty
+  size 5M
+}
+EOF
 }
 
 # ---------------------------------------------------------------------------
@@ -631,8 +651,7 @@ open_firewall_port() {
     firewall-cmd --reload >/dev/null 2>&1 || true
     ok "已通过 firewalld 放行 ${port}/${protocol}"
     return 0
-  fi
-  # 未检测到 UFW/firewalld 时, 不少云厂商精简镜像仍带有独立生效的 iptables/ip6tables
+  fi  # 未检测到 UFW/firewalld 时, 不少云厂商精简镜像仍带有独立生效的 iptables/ip6tables
   # 默认规则 (仅监听端口不代表内核放行), 这里直接对 IPv4 与 IPv6 分别插入放行规则,
   # 这正是很多 "端口监听正常但连不通" 场景的根因, 必须两条链都处理。
   if command -v iptables >/dev/null 2>&1; then
@@ -654,9 +673,16 @@ open_firewall_port() {
 }
 
 close_firewall_port() {
-  # 节点删除时对称撤销 iptables/ip6tables 放行规则 (ufw/firewalld 规则暂不自动撤销,
-  # 避免误删其他节点共用同一策略的规则; 如需清理请手动执行 ufw delete/firewall-cmd --remove-port)
+  # 节点删除时对称撤销放行规则: UFW/firewalld/iptables 三种情况都要处理,
+  # 否则删除节点后端口仍然对外开放。
   local port=$1 protocol=${2:-tcp}
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+    ufw delete allow "${port}/${protocol}" >/dev/null 2>&1 || true
+  fi
+  if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+    firewall-cmd --permanent --remove-port="${port}/${protocol}" >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
   if command -v iptables >/dev/null 2>&1; then
     while iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null; do
       iptables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null || break
@@ -1484,15 +1510,29 @@ _speedtest_one() {
 
 run_speedtest() {
   require_cmd curl awk
-  info "开始测速 (依次测试 Cloudflare / Google / Microsoft, 可能耗时较久)..."
+  info "开始测速..."
+  echo "--- Cloudflare (延迟 + 下载 + 上传, 官方测速接口) ---"
   _speedtest_one "Cloudflare" "https://speed.cloudflare.com/__down?bytes=104857600" \
     "https://speed.cloudflare.com/__up" "speed.cloudflare.com"
-  _speedtest_one "Google" "https://dl.google.com/dl/android/studio/install/latest/android-studio-linux.tar.gz" \
-    "" "www.google.com"
-  _speedtest_one "Microsoft" "https://download.microsoft.com/download/speedtest/dummy" \
-    "" "www.microsoft.com"
+  echo
+  echo "--- Google (仅延迟, Google 无官方公开测速接口, 不编造下载地址) ---"
+  _latency_only "Google" "www.google.com"
+  echo
+  echo "--- Microsoft (仅延迟, Microsoft 无官方公开测速接口, 不编造下载地址) ---"
+  _latency_only "Microsoft" "www.microsoft.com"
   printf '\n'
   ok "测速完成。"
+}
+
+_latency_only() {
+  local name=$1 host=$2 latency
+  latency=$(curl -o /dev/null -s --connect-timeout 3 --max-time 5 \
+    -w '%{time_connect}' "https://${host}/" 2>/dev/null || echo "N/A")
+  if [[ $latency != "N/A" ]]; then
+    printf '%s 延迟: %s ms\n' "$name" "$(awk -v t="$latency" 'BEGIN{printf "%.1f", t*1000}')"
+  else
+    printf '%s 延迟: 测量失败 (可能被防火墙/网络策略阻断)\n' "$name"
+  fi
 }
 
 # ===========================================================================
@@ -2196,6 +2236,16 @@ main() {
     -h|--help|help) usage; return 0 ;;
   esac
   require_root
+  ensure_dirs
+  # 整个进程生命周期内只获取一次互斥锁 (无论交互菜单还是单条命令), 避免两个
+  # 并发的 sb 实例同时修改 config.json 互相覆盖。进程退出时文件描述符自动
+  # 关闭, 锁随之释放, 无需显式 unlock。注意: 这意味着一个交互菜单会话运行期间,
+  # 另一个 sb 调用 (哪怕只是只读的 status/links) 也需要排队等待, 这是为安全性
+  # 做的保守取舍, 对单人运维的 VPS 场景影响可忽略。
+  exec {LOCK_FD}>"$LOCK_FILE"
+  if ! flock -n "$LOCK_FD"; then
+    die "检测到另一个 sb 操作正在进行中 (锁文件: ${LOCK_FILE}), 请等待其结束后重试。"
+  fi
   case ${1:-menu} in
     menu) menu ;;
     install) install_sing_box ;;
