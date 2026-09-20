@@ -45,7 +45,7 @@ readonly MANAGER_PATH="/usr/local/sbin/sing-box-vps"
 readonly SHORTCUT_PATH="/usr/local/bin/sb"
 readonly SUB_HTTPD_UNIT="/etc/systemd/system/sing-box-vps-sub.service"
 
-SCRIPT_UPDATE_URL="${SCRIPT_UPDATE_URL:-https://raw.githubusercontent.com/lisiyong0707/sing-box-vps/main/sing-box-vps.sh}"
+SCRIPT_UPDATE_URL="${SCRIPT_UPDATE_URL:-https://raw.githubusercontent.com/lisiyong0707/singbox/main/sb.sh}"
 
 readonly REALITY_PRESET_DOMAINS=(
   "gateway.icloud.com"
@@ -409,11 +409,23 @@ EOF
 
 install_manager() {
   local source_path=${BASH_SOURCE[0]:-}
-  if [[ -z $source_path || ! -r $source_path ]]; then
-    warn "无法读取当前脚本路径, 跳过创建快捷命令。"
-    return 0
+  if [[ -n $source_path && -r $source_path && $source_path != "/dev/stdin" && $source_path != /proc/self/fd/* ]]; then
+    install -D -m 700 "$source_path" "$MANAGER_PATH"
+  else
+    # 通过 curl ... | sudo bash 这类管道方式运行时, 脚本无法读取自身文件路径,
+    # 改为从远程仓库下载一份完整脚本安装为快捷命令。
+    info "检测到脚本通过管道方式运行 (例如 curl | bash), 正在从远程仓库下载完整脚本以安装 sb 快捷命令..."
+    local tmp
+    tmp=$(mktemp)
+    if curl -fL --proto '=https' --tlsv1.2 "$SCRIPT_UPDATE_URL" -o "$tmp" 2>/dev/null && bash -n "$tmp" 2>/dev/null; then
+      install -D -m 700 "$tmp" "$MANAGER_PATH"
+    else
+      rm -f "$tmp"
+      warn "无法下载远程脚本副本, 跳过创建快捷命令。请先将脚本保存为文件后以 'sudo bash sing-box-vps.sh install' 方式运行, 即可自动创建 sb 命令。"
+      return 0
+    fi
+    rm -f "$tmp"
   fi
-  install -D -m 700 "$source_path" "$MANAGER_PATH"
   tee "$SHORTCUT_PATH" >/dev/null <<EOF
 #!/usr/bin/env bash
 exec ${MANAGER_PATH} "\$@"
@@ -590,18 +602,72 @@ apply_inbound_with_route() {
 # ---------------------------------------------------------------------------
 # 防火墙
 # ---------------------------------------------------------------------------
+persist_iptables_rules() {
+  if command -v netfilter-persistent >/dev/null 2>&1; then
+    netfilter-persistent save >/dev/null 2>&1 || true
+    return 0
+  fi
+  if [[ -d /etc/iptables ]]; then
+    command -v iptables-save  >/dev/null 2>&1 && iptables-save  > /etc/iptables/rules.v4 2>/dev/null
+    command -v ip6tables-save >/dev/null 2>&1 && ip6tables-save > /etc/iptables/rules.v6 2>/dev/null
+    return 0
+  fi
+  # 尝试安装 iptables-persistent 以便规则重启后仍然生效; 静默失败不影响本次放行
+  if command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent >/dev/null 2>&1 || true
+    command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
+  fi
+}
+
 open_firewall_port() {
-  local port=$1 protocol=${2:-tcp}
+  local port=$1 protocol=${2:-tcp} handled=0
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
     ufw allow "${port}/${protocol}" >/dev/null 2>&1
     ok "已通过 UFW 放行 ${port}/${protocol}"
-  elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+    return 0
+  fi
+  if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
     firewall-cmd --permanent --add-port="${port}/${protocol}" >/dev/null 2>&1 || true
     firewall-cmd --reload >/dev/null 2>&1 || true
     ok "已通过 firewalld 放行 ${port}/${protocol}"
-  else
-    warn "未检测到启用中的 UFW/firewalld; 请在云厂商安全组 (阿里云/腾讯云/Vultr/Oracle Cloud 等) 放行 ${port}/${protocol}。"
+    return 0
   fi
+  # 未检测到 UFW/firewalld 时, 不少云厂商精简镜像仍带有独立生效的 iptables/ip6tables
+  # 默认规则 (仅监听端口不代表内核放行), 这里直接对 IPv4 与 IPv6 分别插入放行规则,
+  # 这正是很多 "端口监听正常但连不通" 场景的根因, 必须两条链都处理。
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null \
+      || iptables -I INPUT -p "$protocol" --dport "$port" -j ACCEPT
+    handled=1
+  fi
+  if command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null \
+      || ip6tables -I INPUT -p "$protocol" --dport "$port" -j ACCEPT
+    handled=1
+  fi
+  if (( handled == 1 )); then
+    persist_iptables_rules
+    ok "已在 iptables/ip6tables 放行 ${port}/${protocol} (若使用云厂商安全组, 仍需在控制台分别放行 IPv4 与 IPv6 规则)。"
+  else
+    warn "未检测到 UFW/firewalld/iptables 中任何一种可用的防火墙管理工具; 请在云厂商安全组放行 ${port}/${protocol} (注意 IPv4 与 IPv6 需分别放行)。"
+  fi
+}
+
+close_firewall_port() {
+  # 节点删除时对称撤销 iptables/ip6tables 放行规则 (ufw/firewalld 规则暂不自动撤销,
+  # 避免误删其他节点共用同一策略的规则; 如需清理请手动执行 ufw delete/firewall-cmd --remove-port)
+  local port=$1 protocol=${2:-tcp}
+  if command -v iptables >/dev/null 2>&1; then
+    while iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null; do
+      iptables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null || break
+    done
+  fi
+  if command -v ip6tables >/dev/null 2>&1; then
+    while ip6tables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null; do
+      ip6tables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null || break
+    done
+  fi
+  persist_iptables_rules
 }
 
 # ---------------------------------------------------------------------------
@@ -615,11 +681,12 @@ new_uuid()       { sing-box generate uuid 2>/dev/null || cat /proc/sys/kernel/ra
 generate_reality_keypair() {
   local keypair private_key public_key
   keypair=$(sing-box generate reality-keypair)
-  private_key=$(awk -F': ' '/PrivateKey/ {print $2}' <<<"$keypair" | tr -d '[:space:]')
-  public_key=$(awk -F': ' '/PublicKey/ {print $2}' <<<"$keypair" | tr -d '[:space:]')
+  private_key=$(awk -F': ' '/PrivateKey/ {print $2}' <<<"$keypair")
+  public_key=$(awk -F': ' '/PublicKey/ {print $2}' <<<"$keypair")
   [[ -n $private_key && -n $public_key ]] || die "无法生成 Reality 密钥对。"
   printf '%s|%s' "$private_key" "$public_key"
 }
+
 # Reality 握手域名: 内置推荐列表 + 自定义, 并做连通性/TLS1.3 粗校验
 ask_reality_handshake_domain() {
   local i choice domain
@@ -871,7 +938,7 @@ deploy_vless_reality_unified() {
 
   reality=$(jq -n --arg handshake "$handshake" --arg private_key "$private_key" --arg short_id "$short_id" \
     '{enabled:true,handshake:{server:$handshake,server_port:443},private_key:$private_key,short_id:[$short_id]}')
-  tls=$(jq -n --arg hs "$handshake" --argjson reality "$reality" '{enabled:true,server_name:$hs,reality:$reality}')
+  tls=$(jq -n --argjson reality "$reality" '{enabled:true,reality:$reality}')
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg uuid "$uuid" --argjson tls "$tls" \
     '{type:"vless",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",uuid:$uuid,flow:"xtls-rprx-vision"}],tls:$tls}')
 
@@ -898,7 +965,7 @@ deploy_vless_reality_grpc() {
 
   reality=$(jq -n --arg handshake "$handshake" --arg private_key "$private_key" --arg short_id "$short_id" \
     '{enabled:true,handshake:{server:$handshake,server_port:443},private_key:$private_key,short_id:[$short_id]}')
-  tls=$(jq -n --arg hs "$handshake" --argjson reality "$reality" '{enabled:true,server_name:$hs,reality:$reality}')
+  tls=$(jq -n --argjson reality "$reality" '{enabled:true,reality:$reality}')
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg uuid "$uuid" --arg svc "$service_name" --argjson tls "$tls" \
     '{type:"vless",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",uuid:$uuid}],tls:$tls,transport:{type:"grpc",service_name:$svc}}')
 
@@ -1865,6 +1932,9 @@ remove_inbound() {
   jq -e --arg tag "$tag" '.inbounds[] | select(.tag == $tag)' "$CONFIG_FILE" >/dev/null 2>&1 || die "未找到对应的节点 tag。"
   confirm "确认删除 ${tag} 并清除关联的分流规则" N || return 0
 
+  local listen_port
+  listen_port=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag == $tag) | .listen_port // empty' "$CONFIG_FILE")
+
   local candidate
   candidate=$(mktemp)
   jq --arg tag "$tag" '
@@ -1873,6 +1943,11 @@ remove_inbound() {
   ' "$CONFIG_FILE" > "$candidate"
   apply_candidate "$candidate"
   rm -f "$candidate"
+
+  if [[ -n $listen_port ]]; then
+    close_firewall_port "$listen_port" tcp
+    close_firewall_port "$listen_port" udp
+  fi
 
   atomic_json_update "$STATE_FILE" '.connections |= map(select(.tag != $tag))' --arg tag "$tag" || true
   ok "已成功删除 ${tag} 并同步更新路由。"
