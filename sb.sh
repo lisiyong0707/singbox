@@ -101,6 +101,7 @@ require_cmd() {
 
 ensure_dirs() {
   install -d -m 700 "$CONFIG_DIR" "$STATE_DIR" "$BACKUP_DIR" "$SUB_DIR" "$QR_CACHE_DIR"
+  fix_config_perms
   if [[ ! -f $STATE_FILE ]]; then
     printf '{"connections":[]}\n' > "$STATE_FILE"
     chmod 600 "$STATE_FILE"
@@ -198,11 +199,23 @@ valid_ipv6() {
 # 原子写入引擎: 任意"候选文件"写好之后, 通过本函数校验并原子替换目标文件,
 # 校验失败绝不落地, 不污染生产文件
 # ---------------------------------------------------------------------------
+fix_config_perms() {
+  getent group sing-box >/dev/null 2>&1 || return 0
+  chgrp sing-box "$CONFIG_DIR" 2>/dev/null || true
+  chmod 750 "$CONFIG_DIR"
+  if [[ -f $CONFIG_FILE ]]; then
+    chgrp sing-box "$CONFIG_FILE" 2>/dev/null || true
+    chmod 640 "$CONFIG_FILE"
+  fi
+  return 0
+}
+
 atomic_install() {
   # atomic_install <candidate_tmp_file> <dest_path> <mode>
   local candidate=$1 dest=$2 mode=${3:-600}
   [[ -s $candidate ]] || die "内部错误: 候选文件为空, 拒绝写入 ${dest}。"
   install -m "$mode" "$candidate" "$dest"
+    if [[ $dest == "$CONFIG_FILE" ]]; then fix_config_perms; fi
 }
 
 json_validate() {
@@ -539,9 +552,7 @@ apply_candidate() {
     | sort -nr | head -n1 | cut -d' ' -f2-)
 
   atomic_install "$candidate" "$CONFIG_FILE" 600
-  if getent group sing-box >/dev/null 2>&1; then
-  chgrp sing-box "$CONFIG_DIR" "$CONFIG_FILE" && chmod 750 "$CONFIG_DIR" && chmod 640 "$CONFIG_FILE"
-fi
+  
 
   systemctl enable --now sing-box >/dev/null 2>&1 || true
   if ! systemctl restart sing-box; then
@@ -708,7 +719,14 @@ generate_reality_keypair() {
   [[ -n $private_key && -n $public_key ]] || die "无法生成 Reality 密钥对。"
   printf '%s|%s' "$private_key" "$public_key"
 }
-
+# 询问节点显示名称, 返回 URL 编码后的结果 (可直接拼进 URI 的 # 后面)
+ask_node_name() {
+  local default=$1 name
+  read -r -p "节点名称 [${default}]: " name
+  name=${name:-$default}
+  (( ${#name} <= 64 )) || die "节点名称过长 (最多 64 字符)。"
+  printf '%s' "$name" | jq -sRr '@uri'
+}
 # Reality 握手域名: 内置推荐列表 + 自定义, 并做连通性/TLS1.3 粗校验
 ask_reality_handshake_domain() {
   local i choice domain
@@ -752,10 +770,20 @@ check_port_80() {
   fi
 }
 
+grant_cert_access() {
+  id sing-box >/dev/null 2>&1 || return 0
+  command -v setfacl >/dev/null 2>&1 || apt-get install -y -qq acl
+  setfacl -R -m u:sing-box:rX /etc/letsencrypt/live /etc/letsencrypt/archive 2>/dev/null || true
+  return 0
+}
+
 install_certbot_hook() {
   install -d -m 755 "$(dirname "$CERT_HOOK")"
-  tee "$CERT_HOOK" >/dev/null <<'EOF'
+    tee "$CERT_HOOK" >/dev/null <<'EOF'
 #!/usr/bin/env bash
+if command -v setfacl >/dev/null 2>&1 && id sing-box >/dev/null 2>&1; then
+  setfacl -R -m u:sing-box:rX /etc/letsencrypt/live /etc/letsencrypt/archive || true
+fi
 systemctl try-restart sing-box.service
 EOF
   chmod 755 "$CERT_HOOK"
@@ -781,6 +809,7 @@ obtain_tls_paths() {
       info "正在签发 ${domain} 证书..." >&2
       certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email -d "$domain" >&2
       install_certbot_hook
+      grant_cert_access >&2
       enable_certbot_autorenew >&2
       [[ -r $cert && -r $key ]] || die "证书文件生成失败。"
       ;;
@@ -840,6 +869,7 @@ renew_certificate_now() {
   certbot certonly --standalone --non-interactive --agree-tos --force-renewal \
     --register-unsafely-without-email -d "$domain"
   install_certbot_hook
+  grant_cert_access
   systemctl try-restart sing-box || true
   ok "证书已重新签发: ${domain}"
 }
@@ -965,8 +995,9 @@ deploy_vless_reality_unified() {
     '{type:"vless",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",uuid:$uuid,flow:"xtls-rprx-vision"}],tls:$tls}')
 
   apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
+    local node_name; node_name=$(ask_node_name "Reality-${D_MODE}")
   flag=$(get_server_flag)
-  uri="vless://${uuid}@${D_FORMATTED_HOST}:${D_PORT}?encryption=none&security=reality&type=tcp&flow=xtls-rprx-vision&sni=${handshake}&fp=chrome&pbk=${public_key}&sid=${short_id}#${flag}%20Reality-${D_MODE}"
+  uri="vless://${uuid}@${D_FORMATTED_HOST}:${D_PORT}?encryption=none&security=reality&type=tcp&flow=xtls-rprx-vision&sni=${handshake}&fp=chrome&pbk=${public_key}&sid=${short_id}#${flag}%20${node_name}"
   save_connection "vless-reality-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
   open_firewall_port "$D_PORT" tcp
   ok "VLESS Reality (${D_MODE}) 已成功部署 (绑定出口: ${D_OUTBOUND})"
@@ -992,8 +1023,9 @@ deploy_vless_reality_grpc() {
     '{type:"vless",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",uuid:$uuid}],tls:$tls,transport:{type:"grpc",service_name:$svc}}')
 
   apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
+    local node_name; node_name=$(ask_node_name "Reality-gRPC-${D_MODE}")
   flag=$(get_server_flag)
-  uri="vless://${uuid}@${D_FORMATTED_HOST}:${D_PORT}?encryption=none&security=reality&type=grpc&serviceName=${service_name}&sni=${handshake}&fp=chrome&pbk=${public_key}&sid=${short_id}#${flag}%20Reality-gRPC-${D_MODE}"
+  uri="vless://${uuid}@${D_FORMATTED_HOST}:${D_PORT}?encryption=none&security=reality&type=grpc&serviceName=${service_name}&sni=${handshake}&fp=chrome&pbk=${public_key}&sid=${short_id}#${flag}%20${node_name}"
   save_connection "vless-reality-grpc-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
   open_firewall_port "$D_PORT" tcp
   ok "VLESS Reality gRPC (${D_MODE}) 已部署"
@@ -1021,11 +1053,12 @@ deploy_shadowtls_ss2022() {
     .route.rules += [{"inbound": [$tag], "action": "route", "outbound": $outbound}]
   ' "$CONFIG_FILE" > "$candidate"
   apply_candidate "$candidate"
+    local node_name; node_name=$(ask_node_name "ShadowTLS-SS2022-${D_MODE}")
   rm -f "$candidate"
 
   encoded_ss=$(printf '%s' "2022-blake3-aes-128-gcm:${ss_key}" | base64 -w 0)
   flag=$(get_server_flag)
-  uri="ss://${encoded_ss}@${D_FORMATTED_HOST}:${D_PORT}?plugin=shadow-tls%3Bhost%3D${handshake}%3Bpassword%3D${st_password}%3Bversion%3D3#${flag}%20ShadowTLS-SS2022-${D_MODE}"
+  uri="ss://${encoded_ss}@${D_FORMATTED_HOST}:${D_PORT}?plugin=shadow-tls%3Bhost%3D${handshake}%3Bpassword%3D${st_password}%3Bversion%3D3#${flag}%20${node_name}"
   save_connection "shadowtls-v3-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
   open_firewall_port "$D_PORT" tcp
   ok "ShadowTLS v3 + SS2022 (${D_MODE}) 已部署"
@@ -1043,8 +1076,9 @@ deploy_shadowsocks() {
   apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
 
   encoded=$(printf '%s' "2022-blake3-aes-128-gcm:${key}" | base64 -w 0)
+    local node_name; node_name=$(ask_node_name "SS2022-${D_MODE}")
   flag=$(get_server_flag)
-  uri="ss://${encoded}@${D_FORMATTED_HOST}:${D_PORT}#${flag}%20SS2022-${D_MODE}"
+  uri="ss://${encoded}@${D_FORMATTED_HOST}:${D_PORT}#${flag}%20${node_name}"
   save_connection "shadowsocks-2022-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
   open_firewall_port "$D_PORT" tcp
   open_firewall_port "$D_PORT" udp
@@ -1065,9 +1099,9 @@ deploy_trojan() {
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg password "$password" --argjson tls "$tls" \
     '{type:"trojan",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",password:$password}],tls:$tls}')
   apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
-
+    local node_name; node_name=$(ask_node_name "Trojan-${D_MODE}")
   flag=$(get_server_flag)
-  uri="trojan://${password}@${D_FORMATTED_HOST}:${D_PORT}?security=tls&sni=${D_HOST}&type=tcp#${flag}%20Trojan-${D_MODE}"
+  uri="trojan://${password}@${D_FORMATTED_HOST}:${D_PORT}?security=tls&sni=${D_HOST}&type=tcp#${flag}%20${node_name}"
   save_connection "trojan-tls-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
   open_firewall_port "$D_PORT" tcp
   ok "Trojan TLS (${D_MODE}) 已部署"
@@ -1087,9 +1121,9 @@ deploy_vless() {
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg uuid "$uuid" --argjson tls "$tls" \
     '{type:"vless",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",uuid:$uuid}],tls:$tls}')
   apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
-
+  local node_name; node_name=$(ask_node_name "VLESS-${D_MODE}")
   flag=$(get_server_flag)
-  uri="vless://${uuid}@${D_FORMATTED_HOST}:${D_PORT}?encryption=none&security=tls&type=tcp&sni=${D_HOST}#${flag}%20VLESS-${D_MODE}"
+  uri="vless://${uuid}@${D_FORMATTED_HOST}:${D_PORT}?encryption=none&security=tls&type=tcp&sni=${D_HOST}#${flag}%20${node_name}"
   save_connection "vless-tls-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
   open_firewall_port "$D_PORT" tcp
   ok "VLESS TLS (${D_MODE}) 已部署"
@@ -1110,9 +1144,9 @@ deploy_hysteria2() {
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg password "$password" --arg obfs "$obfs_password" --argjson tls "$tls" \
     '{type:"hysteria2",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",password:$password}],obfs:{type:"salamander",password:$obfs},tls:$tls}')
   apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
-
+  local node_name; node_name=$(ask_node_name "Hysteria2-${D_MODE}")
   flag=$(get_server_flag)
-  uri="hysteria2://${password}@${D_FORMATTED_HOST}:${D_PORT}?sni=${D_HOST}&obfs=salamander&obfs-password=${obfs_password}#${flag}%20Hysteria2-${D_MODE}"
+  uri="hysteria2://${password}@${D_FORMATTED_HOST}:${D_PORT}?sni=${D_HOST}&obfs=salamander&obfs-password=${obfs_password}#${flag}%20${node_name}"
   save_connection "hysteria2-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
   open_firewall_port "$D_PORT" udp
   ok "Hysteria2 (${D_MODE}) 已部署"
@@ -1133,9 +1167,9 @@ deploy_tuic() {
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg uuid "$uuid" --arg password "$password" --argjson tls "$tls" \
     '{type:"tuic",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",uuid:$uuid,password:$password}],congestion_control:"bbr",zero_rtt_handshake:false,tls:$tls}')
   apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
-
+    local node_name; node_name=$(ask_node_name "TUIC-${D_MODE}")
   flag=$(get_server_flag)
-  uri="tuic://${uuid}:${password}@${D_FORMATTED_HOST}:${D_PORT}?congestion_control=bbr&sni=${D_HOST}#${flag}%20TUIC-${D_MODE}"
+  uri="tuic://${uuid}:${password}@${D_FORMATTED_HOST}:${D_PORT}?congestion_control=bbr&sni=${D_HOST}#${flag}%20${node_name}"
   save_connection "tuic-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
   open_firewall_port "$D_PORT" udp
   ok "TUIC (${D_MODE}) 已部署"
@@ -1192,13 +1226,28 @@ deploy_cloudflare_tunnel() {
   read -r -p "请选择 [1]: " use_token
   use_token=${use_token:-1}
 
-  if [[ $use_token == 1 ]]; then
+    if [[ $use_token == 1 ]]; then
+    printf '\n%s\n' "---------------- Token 模式操作指引 ----------------"
+    printf ' 1. 打开 Cloudflare Zero Trust → Networks → Tunnels\n'
+    printf ' 2. 创建 Tunnel (Cloudflared 类型), 复制安装命令里 "install" 后面那串 Token\n'
+    printf ' 3. 该 Tunnel 的 Public Hostname 稍后按本脚本提示添加 (不要提前乱填)\n'
+    printf '%s\n\n' "----------------------------------------------------"
     read -r -s -p "Cloudflare Tunnel Token (输入不回显): " tunnel_token
     printf '\n'
     [[ -n $tunnel_token ]] || die "Tunnel Token 不能为空。"
+    cloudflared service uninstall >/dev/null 2>&1 || true   # 已装过会报错, 先清掉
     info "注册并启动 cloudflared 系统服务 (token 模式)..."
     cloudflared service install "$tunnel_token"
     tunnel_name="token-${port}"
+
+    printf '\n%s\n' "======== 现在请到 Cloudflare 后台添加 Public Hostname ========"
+    printf '  Subdomain / Domain : %s\n' "$domain"
+    printf '  Path               : (留空)\n'
+    printf '  Service Type       : HTTP\n'
+    printf '  URL                : 127.0.0.1:%s\n' "$port"
+    printf '  注意: 类型必须选 HTTP (不是 HTTPS), WebSocket 默认已开启, 无需额外设置\n'
+    printf '%s\n\n' "==============================================================="
+    read -r -p "添加完成后按回车继续..." _ || true
   else
     require_cmd cloudflared
     [[ -f /root/.cloudflared/cert.pem || -f "${HOME}/.cloudflared/cert.pem" ]] || {
@@ -1263,10 +1312,22 @@ EOF
     --arg name "$tunnel_name" --arg domain "$domain" --arg port "$port" --arg tag "$tag" || true
 
   path_encoded=$(jq -nr --arg path "$path" '$path | @uri')
+    local node_name; node_name=$(ask_node_name "CF-Tunnel")
   flag=$(get_server_flag)
-  uri="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=${path_encoded}&sni=${domain}#${flag}%20CF-Tunnel"
+  uri="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=${path_encoded}&sni=${domain}#${flag}%20${node_name}"
   save_connection "vless-ws-cloudflare-tunnel" "$tag" "$domain" 443 "$uri"
+    info "等待隧道生效并做连通性自检..."
+  sleep 3
+  local code
+  code=$(curl -s -o /dev/null -m 8 -w '%{http_code}' "https://${domain}${path}" || true)
+  case $code in
+    400|426|101) ok "隧道链路正常 (HTTP ${code}: 服务端已响应, 只是拒绝了非 WebSocket 请求, 属正常现象)。" ;;
+    502|530|000) warn "HTTP ${code}: 隧道未接通。检查: ① 后台 Public Hostname 是否指向 127.0.0.1:${port}; ② 'sb cftunnel' 里看 cloudflared 状态与日志。" ;;
+    404)         warn "HTTP 404: 请求到了 Cloudflare 但没命中本机服务。检查后台 Service 的 URL 端口是否是 ${port}。" ;;
+    *)           info "自检返回 HTTP ${code}, 请用客户端实测。" ;;
+  esac
   ok "Cloudflare Tunnel 与本地 VLESS WS 部署完成"
+  info "客户端提示: 地址=${domain} 端口=443 TLS 开启 传输=ws 路径=${path}"
   print_result_block "Cloudflare Tunnel + VLESS WS" "$uri" "$tag"
 }
 
@@ -1987,7 +2048,81 @@ remove_inbound() {
   atomic_json_update "$STATE_FILE" '.connections |= map(select(.tag != $tag))' --arg tag "$tag" || true
   ok "已成功删除 ${tag} 并同步更新路由。"
 }
+pick_connection_tag() {
+  local -a tags=(); local i idx
+  mapfile -t tags < <(jq -r '.connections[].tag' "$STATE_FILE")
+  (( ${#tags[@]} > 0 )) || { warn "尚无节点记录。"; return 1; }
+  for i in "${!tags[@]}"; do printf '  %d) %s\n' "$((i+1))" "${tags[$i]}" >&2; done
+  read -r -p "选择节点编号: " idx
+  [[ $idx =~ ^[0-9]+$ ]] && (( idx >= 1 && idx <= ${#tags[@]} )) || { warn "无效编号。"; return 1; }
+  printf '%s' "${tags[$((idx-1))]}"
+}
 
+rename_node() {
+  ensure_dirs
+  local tag new_enc old_uri new_uri
+  tag=$(pick_connection_tag) || return 0
+  new_enc=$(ask_node_name "$tag")
+  old_uri=$(jq -r --arg t "$tag" '.connections[]|select(.tag==$t)|.uri' "$STATE_FILE")
+  new_uri="${old_uri%%#*}#${new_enc}"
+  atomic_json_update "$STATE_FILE" \
+    '(.connections[]|select(.tag==$t)|.uri) = $u' --arg t "$tag" --arg u "$new_uri" \
+    && ok "已重命名, 请重新导入客户端 / 刷新订阅。"
+}
+
+# 按协议类型返回需要放行的传输层协议
+_type_protocols() {
+  case "$1" in
+    hysteria2*|tuic*) echo udp ;;
+    shadowsocks*)     echo "tcp udp" ;;
+    *)                echo tcp ;;
+  esac
+}
+
+change_node_port() {
+  ensure_installed
+  local tag type old_port new_port candidate old_uri new_uri p
+  tag=$(pick_connection_tag) || return 0
+  type=$(jq -r --arg t "$tag" '.connections[]|select(.tag==$t)|.type' "$STATE_FILE")
+  [[ $type == vless-ws-cloudflare-tunnel ]] && { warn "Tunnel 节点的端口需同时改 Cloudflare 后台, 请删除后重建。"; return 0; }
+  old_port=$(jq -r --arg t "$tag" '.connections[]|select(.tag==$t)|.port' "$STATE_FILE")
+  new_port=$(ask_port "新的监听端口" "$old_port")
+  [[ $new_port != "$old_port" ]] || return 0
+  ensure_port_available "$new_port"
+
+  candidate=$(mktemp)
+  jq --arg t "$tag" --argjson p "$new_port" \
+    '(.inbounds[]|select(.tag==$t)|.listen_port) = $p' "$CONFIG_FILE" > "$candidate"
+  apply_candidate "$candidate"; rm -f "$candidate"
+
+  old_uri=$(jq -r --arg t "$tag" '.connections[]|select(.tag==$t)|.uri' "$STATE_FILE")
+  new_uri=$(printf '%s' "$old_uri" | sed -E "s/:${old_port}([?#])/:${new_port}\1/")
+  atomic_json_update "$STATE_FILE" \
+    '(.connections[]|select(.tag==$t)) |= (.port=($np|tonumber) | .uri=$u)' \
+    --arg t "$tag" --arg np "$new_port" --arg u "$new_uri"
+
+  for p in $(_type_protocols "$type"); do
+    close_firewall_port "$old_port" "$p"
+    open_firewall_port "$new_port" "$p"
+  done
+  ok "端口已由 ${old_port} 改为 ${new_port}, 新连接串:"
+  print_result_block "$tag" "$new_uri" "$tag"
+}
+
+node_edit_menu() {
+  local choice
+  while true; do
+    title "编辑节点"
+    printf '  1) 重命名节点\n  2) 修改监听端口\n  0) 返回主菜单\n'
+    read -r -p '请选择: ' choice
+    case $choice in
+      1) rename_node ;;
+      2) change_node_port ;;
+      0) return 0 ;;
+      *) warn "无效的编号选择。" ;;
+    esac
+  done
+}
 validate_and_restart() {
   ensure_installed
   sing-box check -c "$CONFIG_FILE"
@@ -2147,6 +2282,7 @@ print_menu() {
   printf ' 27) 更新 sing-box 核心\n'
   printf ' 28) 从 GitHub 更新本脚本\n'
   printf ' 29) 卸载 sing-box\n'
+  printf ' 30) 编辑节点 (改名 / 改端口)\n'
   printf '  0) 退出\n\n'
 }
 
@@ -2185,6 +2321,7 @@ menu() {
       27) upgrade_sing_box ;;
       28) update_manager ;;
       29) uninstall_sing_box ;;
+      30) node_edit_menu ;;
       0) exit 0 ;;
       *) warn "无效的编号选择。" ;;
     esac
@@ -2222,6 +2359,7 @@ usage() {
   rollback        恢复最近一次配置备份
   upgrade         更新 sing-box 核心
   self-update     从 GitHub 更新本脚本
+  edit            编辑节点 (改名 / 改端口)
   uninstall       卸载 sing-box
 EOF
 }
@@ -2272,6 +2410,7 @@ main() {
     rollback) restore_backup ;;
     remove) remove_inbound ;;
     uninstall) uninstall_sing_box ;;
+    edit) node_edit_menu ;;
     *) usage; exit 1 ;;
   esac
 }
