@@ -24,7 +24,7 @@ umask 077
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
-readonly SCRIPT_VERSION="3.0.0"
+readonly SCRIPT_VERSION="0.0.1"
 readonly SB_MIN_VERSION="1.12.0"
 
 readonly CONFIG_DIR="/etc/sing-box"
@@ -85,6 +85,26 @@ on_error() {
   exit "$exit_code"
 }
 trap 'on_error $LINENO' ERR
+# ---- 中断提示: 部署进行中被打断时, 告诉用户去跑 reconcile ----
+PENDING_TAG=""
+
+on_interrupt() {
+  local sig=$1 code=130
+  trap - INT TERM HUP
+  case $sig in
+    TERM) code=143 ;;
+    HUP)  code=129 ;;
+  esac
+  if [[ -n $PENDING_TAG ]]; then
+    warn "收到 ${sig}: 节点 [${PENDING_TAG}] 可能已写入并生效, 但连接记录/防火墙可能未完成。请运行: sb reconcile" || true
+  else
+    warn "已中断 (${sig})。" || true
+  fi
+  exit "$code"
+}
+trap 'on_interrupt INT'  INT
+trap 'on_interrupt TERM' TERM
+trap 'on_interrupt HUP'  HUP
 
 # ---------------------------------------------------------------------------
 # 基础前置检查
@@ -622,6 +642,7 @@ apply_inbound_with_route() {
     .inbounds += [$inbound] |
     .route.rules += [{"inbound": [$tag], "action": "route", "outbound": $outbound}]
   ' "$CONFIG_FILE" > "$candidate"
+  PENDING_TAG=$tag
   apply_candidate "$candidate"
   rm -f "$candidate"
 }
@@ -922,6 +943,7 @@ show_qrcode() {
 
 print_result_block() {
   local title=$1 uri=$2 tag=$3
+  PENDING_TAG=""
   printf '\n%s 客户端连接串:\n%s\n' "$title" "$uri"
   show_qrcode "$uri" "$tag"
   printf '\n'
@@ -993,10 +1015,9 @@ deploy_vless_reality_unified() {
   tls=$(jq -n --arg handshake "$handshake" --argjson reality "$reality" '{enabled:true,server_name:$handshake,reality:$reality}')
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg uuid "$uuid" --argjson tls "$tls" \
     '{type:"vless",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",uuid:$uuid,flow:"xtls-rprx-vision"}],tls:$tls}')
-
-  apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
-    local node_name; node_name=$(ask_node_name "Reality-${D_MODE}")
+  local node_name; node_name=$(ask_node_name "Reality-${D_MODE}")
   flag=$(get_server_flag)
+  apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"  
   uri="vless://${uuid}@${D_FORMATTED_HOST}:${D_PORT}?encryption=none&security=reality&type=tcp&flow=xtls-rprx-vision&sni=${handshake}&fp=chrome&pbk=${public_key}&sid=${short_id}#${flag}%20${node_name}"
   save_connection "vless-reality-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
   open_firewall_port "$D_PORT" tcp
@@ -1021,10 +1042,9 @@ deploy_vless_reality_grpc() {
   tls=$(jq -n --arg handshake "$handshake" --argjson reality "$reality" '{enabled:true,server_name:$handshake,reality:$reality}')
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg uuid "$uuid" --arg svc "$service_name" --argjson tls "$tls" \
     '{type:"vless",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",uuid:$uuid}],tls:$tls,transport:{type:"grpc",service_name:$svc}}')
-
-  apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
-    local node_name; node_name=$(ask_node_name "Reality-gRPC-${D_MODE}")
+  local node_name; node_name=$(ask_node_name "Reality-gRPC-${D_MODE}")
   flag=$(get_server_flag)
+  apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
   uri="vless://${uuid}@${D_FORMATTED_HOST}:${D_PORT}?encryption=none&security=reality&type=grpc&serviceName=${service_name}&sni=${handshake}&fp=chrome&pbk=${public_key}&sid=${short_id}#${flag}%20${node_name}"
   save_connection "vless-reality-grpc-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
   open_firewall_port "$D_PORT" tcp
@@ -1052,12 +1072,12 @@ deploy_shadowtls_ss2022() {
     .inbounds += [$inb_st, $inb_ss] |
     .route.rules += [{"inbound": [$tag], "action": "route", "outbound": $outbound}]
   ' "$CONFIG_FILE" > "$candidate"
-  apply_candidate "$candidate"
-    local node_name; node_name=$(ask_node_name "ShadowTLS-SS2022-${D_MODE}")
-  rm -f "$candidate"
-
-  encoded_ss=$(printf '%s' "2022-blake3-aes-128-gcm:${ss_key}" | base64 -w 0)
+  local node_name; node_name=$(ask_node_name "ShadowTLS-SS2022-${D_MODE}")
   flag=$(get_server_flag)
+  PENDING_TAG="$D_TAG"
+  apply_candidate "$candidate"  
+  rm -f "$candidate"
+  encoded_ss=$(printf '%s' "2022-blake3-aes-128-gcm:${ss_key}" | base64 -w 0)
   uri="ss://${encoded_ss}@${D_FORMATTED_HOST}:${D_PORT}?plugin=shadow-tls%3Bhost%3D${handshake}%3Bpassword%3D${st_password}%3Bversion%3D3#${flag}%20${node_name}"
   save_connection "shadowtls-v3-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
   open_firewall_port "$D_PORT" tcp
@@ -1073,11 +1093,10 @@ deploy_shadowsocks() {
   key=$(random_ss_key)
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg key "$key" \
     '{type:"shadowsocks",tag:$tag,listen:$listen,listen_port:$port,method:"2022-blake3-aes-128-gcm",password:$key,multiplex:{enabled:true}}')
-  apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
-
-  encoded=$(printf '%s' "2022-blake3-aes-128-gcm:${key}" | base64 -w 0)
-    local node_name; node_name=$(ask_node_name "SS2022-${D_MODE}")
+  local node_name; node_name=$(ask_node_name "SS2022-${D_MODE}")
   flag=$(get_server_flag)
+  apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
+  encoded=$(printf '%s' "2022-blake3-aes-128-gcm:${key}" | base64 -w 0)  
   uri="ss://${encoded}@${D_FORMATTED_HOST}:${D_PORT}#${flag}%20${node_name}"
   save_connection "shadowsocks-2022-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
   open_firewall_port "$D_PORT" tcp
@@ -1098,9 +1117,9 @@ deploy_trojan() {
   tls=$(tls_json "$D_HOST" "$cert" "$key")
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg password "$password" --argjson tls "$tls" \
     '{type:"trojan",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",password:$password}],tls:$tls}')
-  apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
-    local node_name; node_name=$(ask_node_name "Trojan-${D_MODE}")
+  local node_name; node_name=$(ask_node_name "Trojan-${D_MODE}")
   flag=$(get_server_flag)
+  apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
   uri="trojan://${password}@${D_FORMATTED_HOST}:${D_PORT}?security=tls&sni=${D_HOST}&type=tcp#${flag}%20${node_name}"
   save_connection "trojan-tls-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
   open_firewall_port "$D_PORT" tcp
@@ -1120,9 +1139,9 @@ deploy_vless() {
   tls=$(tls_json "$D_HOST" "$cert" "$key")
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg uuid "$uuid" --argjson tls "$tls" \
     '{type:"vless",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",uuid:$uuid}],tls:$tls}')
-  apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
   local node_name; node_name=$(ask_node_name "VLESS-${D_MODE}")
   flag=$(get_server_flag)
+  apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
   uri="vless://${uuid}@${D_FORMATTED_HOST}:${D_PORT}?encryption=none&security=tls&type=tcp&sni=${D_HOST}#${flag}%20${node_name}"
   save_connection "vless-tls-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
   open_firewall_port "$D_PORT" tcp
@@ -1143,9 +1162,9 @@ deploy_hysteria2() {
   tls=$(tls_json "$D_HOST" "$cert" "$key")
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg password "$password" --arg obfs "$obfs_password" --argjson tls "$tls" \
     '{type:"hysteria2",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",password:$password}],obfs:{type:"salamander",password:$obfs},tls:$tls}')
-  apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
   local node_name; node_name=$(ask_node_name "Hysteria2-${D_MODE}")
   flag=$(get_server_flag)
+  apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
   uri="hysteria2://${password}@${D_FORMATTED_HOST}:${D_PORT}?sni=${D_HOST}&obfs=salamander&obfs-password=${obfs_password}#${flag}%20${node_name}"
   save_connection "hysteria2-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
   open_firewall_port "$D_PORT" udp
@@ -1166,9 +1185,9 @@ deploy_tuic() {
   tls=$(tls_json "$D_HOST" "$cert" "$key")
   inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg uuid "$uuid" --arg password "$password" --argjson tls "$tls" \
     '{type:"tuic",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",uuid:$uuid,password:$password}],congestion_control:"bbr",zero_rtt_handshake:false,tls:$tls}')
-  apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
-    local node_name; node_name=$(ask_node_name "TUIC-${D_MODE}")
+  local node_name; node_name=$(ask_node_name "TUIC-${D_MODE}")
   flag=$(get_server_flag)
+  apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
   uri="tuic://${uuid}:${password}@${D_FORMATTED_HOST}:${D_PORT}?congestion_control=bbr&sni=${D_HOST}#${flag}%20${node_name}"
   save_connection "tuic-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
   open_firewall_port "$D_PORT" udp
@@ -1328,6 +1347,7 @@ EOF
     '{type:"vless",tag:$tag,listen:"127.0.0.1",listen_port:$port,users:[{name:"default",uuid:$uuid}],transport:{type:"ws",path:$path}}')
   candidate=$(mktemp)
   jq --argjson inbound "$inbound" '.inbounds += [$inbound]' "$CONFIG_FILE" > "$candidate"
+  PENDING_TAG="$tag"
   apply_candidate "$candidate"
   rm -f "$candidate"
 
@@ -1336,10 +1356,11 @@ EOF
     --arg name "$tunnel_name" --arg domain "$domain" --arg port "$port" --arg tag "$tag" || true
 
   path_encoded=$(jq -nr --arg path "$path" '$path | @uri')
-    local node_name; node_name=$(ask_node_name "CF-Tunnel")
+  local node_name; node_name=$(ask_node_name "CF-Tunnel")
   flag=$(get_server_flag)
   uri="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=${path_encoded}&sni=${domain}#${flag}%20${node_name}"
   save_connection "vless-ws-cloudflare-tunnel" "$tag" "$domain" 443 "$uri"
+  PENDING_TAG=""
     info "等待隧道生效并做连通性自检..."
   sleep 3
   local code
@@ -2211,7 +2232,7 @@ change_reality_domain() {
       old_dom=$(jq -r --arg t "$tag" '.inbounds[]|select(.tag==$t)|.tls.server_name' "$CONFIG_FILE") ;;
     shadowtls*)
       filter='(.inbounds[]|select(.tag==$t)|.handshake.server) = $d'
-      old_dom=$(jq -r --arg t "$tag" '.inbounds[]|select(.tag==$t)|.handshake.server' "$CONFIG_FILE") ;;
+      old_dom=$(jq -r --arg t "$tag" '.inbounds[]|select(.tag==$t)|.tls.server_name // empty' "$CONFIG_FILE") ;;
     *) warn "该节点不是 Reality / ShadowTLS 类型。"; return 0 ;;
   esac
   [[ -n $old_dom ]] || { warn "读取原握手域名失败。"; return 0; }
@@ -2239,7 +2260,8 @@ change_tls_domain() {
     trojan*|vless-tls*|hysteria2*|tuic*|anytls*) ;;
     *) warn "该节点不是 TLS 证书类节点。"; return 0 ;;
   esac
-  old_dom=$(jq -r --arg t "$tag" '.inbounds[]|select(.tag==$t)|.tls.server_name' "$CONFIG_FILE")
+  old_dom=$(jq -r --arg t "$tag" '.inbounds[]|select(.tag==$t)|.tls.server_name // empty' "$CONFIG_FILE")
+  [[ -n $old_dom ]] || { warn "读取原 TLS 域名失败。"; return 0; }
   new_dom=$(ask_hostname "新的 TLS 域名 (需已解析到本机)")
   [[ $new_dom != "$old_dom" ]] || return 0
   paths=$(obtain_tls_paths "$new_dom")
@@ -2436,6 +2458,7 @@ print_menu() {
   printf ' 29) 卸载 sing-box\n'
   printf ' 30) 编辑节点 (改名 / 改端口 / 改地址 / 改域名)\n'
   printf ' 31) 新建 AnyTLS + TLS 入站\n'
+  printf ' 32) 检查并修复孤儿节点 (reconcile)\n'
   printf '  0) 退出\n\n'
 }
 
@@ -2476,6 +2499,7 @@ menu() {
       29) uninstall_sing_box ;;
       30) node_edit_menu ;;
       31) deploy_anytls ;;
+      32) reconcile_nodes ;;
       0) exit 0 ;;
       *) warn "无效的编号选择。" ;;
     esac
@@ -2514,7 +2538,7 @@ usage() {
   rollback        恢复最近一次配置备份
   upgrade         更新 sing-box 核心
   self-update     从 GitHub 更新本脚本
-  edit            编辑节点 (改名 / 改端口)
+  edit            编辑节点 (改名/端口/地址/域名)
   uninstall       卸载 sing-box
 EOF
 }
@@ -2567,6 +2591,7 @@ main() {
     remove) remove_inbound ;;
     uninstall) uninstall_sing_box ;;
     edit) node_edit_menu ;;
+    reconcile) reconcile_nodes ;;
     *) usage; exit 1 ;;
   esac
 }
