@@ -1229,13 +1229,57 @@ cf_state_init() {
 }
 
 install_cloudflared() {
+  info "安装 cloudflared（自动检测最佳方式）"
+
+  # 方式一：尝试直接下载二进制（最可靠，跳过 APT 源问题）
+  local arch bin_url tmp_bin
+  arch=$(uname -m)
+  case "$arch" in
+    x86_64)  bin_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" ;;
+    aarch64) bin_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64" ;;
+    armv7l)  bin_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm" ;;
+    *)       bin_url="" ;;
+  esac
+
+  if [[ -n "$bin_url" ]]; then
+    tmp_bin=$(mktemp)
+    if curl -fsSL --retry 3 --connect-timeout 15 "$bin_url" -o "$tmp_bin" 2>/dev/null; then
+      install -m 755 "$tmp_bin" /usr/local/bin/cloudflared
+      rm -f "$tmp_bin"
+      info "cloudflared 二进制安装成功: $(cloudflared --version)"
+      install -d -m 700 "$CF_CONFIG_DIR" "$CF_CRED_DIR"
+      return 0
+    fi
+    rm -f "$tmp_bin"
+    warn "二进制下载失败，尝试 APT 源方式..."
+  fi
+
+  # 方式二：APT 源（修复 GPG 密钥格式问题）
   require_apt
   info "配置 Cloudflare 官方 cloudflared APT 源"
   install -d -m 755 /usr/share/keyrings
-  curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg
+
+  # 修复：用 gpg --dearmor 确保密钥为正确的二进制格式
+  local tmp_gpg
+  tmp_gpg=$(mktemp)
+  if curl -fsSL --retry 3 --connect-timeout 15 \
+      https://pkg.cloudflare.com/cloudflare-main.gpg -o "$tmp_gpg"; then
+    # 判断是否已是二进制格式，若是 ASCII armor 则转换
+    if file "$tmp_gpg" 2>/dev/null | grep -qi "PGP public key block\|ASCII"; then
+      gpg --dearmor < "$tmp_gpg" > /usr/share/keyrings/cloudflare-main.gpg
+    else
+      install -m 644 "$tmp_gpg" /usr/share/keyrings/cloudflare-main.gpg
+    fi
+    rm -f "$tmp_gpg"
+  else
+    rm -f "$tmp_gpg"
+    die "无法下载 Cloudflare GPG 密钥，请检查网络连接"
+  fi
+
   tee /etc/apt/sources.list.d/cloudflared.list >/dev/null <<'EOF'
 deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main
 EOF
+
   apt-get update -qq
   apt-get install -y -qq cloudflared
   install -d -m 700 "$CF_CONFIG_DIR" "$CF_CRED_DIR"
