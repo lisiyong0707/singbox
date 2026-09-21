@@ -326,17 +326,11 @@ format_host_uri() {
 }
 
 get_server_flag() {
-  local country c1 c2
-  country=$(curl -4fsS --connect-timeout 2 --max-time 3 "https://ipapi.co/country/" 2>/dev/null | tr -d '[:space:]' || true)
-  if [[ ! $country =~ ^[A-Za-z]{2}$ ]]; then
-    country=$(curl -4fsS --connect-timeout 2 --max-time 3 "https://api.country.is/" 2>/dev/null | jq -r '.country // empty' 2>/dev/null || true)
-  fi
+  local country
+  country=$(curl -4fsS --connect-timeout 2 --max-time 3 "https://ipapi.co/country/" 2>/dev/null | tr -d '[:space:]')
+  [[ $country =~ ^[A-Za-z]{2}$ ]] || country=$(curl -4fsS --connect-timeout 2 --max-time 3 "https://api.country.is/" 2>/dev/null | jq -r '.country // empty')
   if [[ $country =~ ^[A-Za-z]{2}$ ]]; then
-    country=$(printf '%s' "$country" | tr '[:lower:]' '[:upper:]')
-    c1=${country:0:1}; c2=${country:1:1}
-    printf "%b%b" \
-      "$(printf '\\U%08X' $(( 0x1F1E6 + $(printf '%d' "'$c1") - 65 )))" \
-      "$(printf '\\U%08X' $(( 0x1F1E6 + $(printf '%d' "'$c2") - 65 )))"
+    python3 -c "c='$country'.upper();print(''.join(chr(0x1F1E6+ord(x)-65) for x in c))"
   else
     printf "🌐"
   fi
@@ -354,15 +348,14 @@ get_server_flag() {
 readonly SB_DNS_RESOLVER_TAG="dns-direct"
 
 ensure_dns_resolver() {
-  # 确保配置里存在一个可供 domain_resolver 引用的 DNS server
+  if jq -e --arg tag "$SB_DNS_RESOLVER_TAG" \
+      '(.dns.servers // []) | any(.tag == $tag)' "$CONFIG_FILE" >/dev/null 2>&1; then
+    return 0
+  fi
   atomic_json_update "$CONFIG_FILE" '
-    if .dns == null then .dns = {servers: []} else . end |
-    if (.dns.servers | map(select(.tag == $tag)) | length) == 0 then
-      .dns.servers += [{type:"udp", tag:$tag, server:"1.1.1.1"}]
-    else . end
+    .dns = ((.dns // {}) | .servers = ((.servers // []) + [{type:"udp", tag:$tag, server:"1.1.1.1"}]))
   ' --arg tag "$SB_DNS_RESOLVER_TAG" || true
 }
-
 
 ask_node_network_mode() {
   local stack choice
@@ -544,6 +537,7 @@ create_base_config() {
 ensure_base_routing() {
   ensure_dirs
   create_base_config
+  ensure_dns_resolver
 }
 # ---------------------------------------------------------------------------
 # 配置备份
@@ -620,13 +614,14 @@ check_and_handle_existing_tag() {
       local candidate
       candidate=$(mktemp)
       jq --arg tag "$tag" '
-        .inbounds |= map(select(.tag != $tag)) |
+        ([.inbounds[]? | select(.tag == $tag) | .detour // empty]) as $detours |
+        .inbounds |= map(select(.tag != $tag and ((.tag | IN($detours[])) | not))) |
         if .route.rules then .route.rules |= map(select((.inbound // []) | index($tag) | not)) else . end
       ' "$CONFIG_FILE" > "$candidate"
       apply_candidate "$candidate"
       rm -f "$candidate"
       atomic_json_update "$STATE_FILE" '.connections |= map(select(.tag != $tag))' --arg tag "$tag"
-      ok "已自动清理旧节点 [${tag}], 开始重新写入..."
+      ok "已自动清理旧节点 [${tag}] 及其关联入站, 开始重新写入..."
       return 0
     fi
     warn "操作已取消。"
@@ -743,10 +738,15 @@ generate_reality_keypair() {
 # 询问节点显示名称, 返回 URL 编码后的结果 (可直接拼进 URI 的 # 后面)
 ask_node_name() {
   local default=$1 name
-  read -r -p "节点名称 [${default}]: " name
-  name=${name:-$default}
-  (( ${#name} <= 64 )) || die "节点名称过长 (最多 64 字符)。"
-  printf '%s' "$name" | jq -sRr '@uri'
+  while true; do
+    read -r -p "节点名称 [${default}]: " name || true
+    name=${name:-$default}
+    if (( ${#name} <= 64 )); then
+      printf '%s' "$name" | jq -sRr '@uri'
+      return 0
+    fi
+    warn "节点名称过长 (最多 64 字符), 请重新输入。"
+  done
 }
 # Reality 握手域名: 内置推荐列表 + 自定义, 并做连通性/TLS1.3 粗校验
 ask_reality_handshake_domain() {
@@ -1257,11 +1257,11 @@ deploy_cloudflare_tunnel() {
 
   domain=$(ask_hostname "Cloudflare 托管域名 (例如 cf.example.com)")
   port=$(ask_port "本地 VLESS WebSocket 端口 (仅监听 127.0.0.1)" 10000)
+  tag="vless-ws-cf-${port}"
+  check_and_handle_existing_tag "$tag" || return 0
   ensure_port_available "$port"
   path=$(random_path)
   uuid=$(new_uuid)
-  tag="vless-ws-cf-${port}"
-  check_and_handle_existing_tag "$tag" || return 0
 
   printf "\nTunnel 接入方式:\n" >&2
   printf "  1) 已在 Zero Trust 后台创建 Tunnel 并拿到 Token (推荐, 快速接入)\n" >&2
@@ -1755,6 +1755,11 @@ sub_collect_uris() {
   jq -r '.connections[]?.uri' "$STATE_FILE" 2>/dev/null
 }
 
+# 给 sing-box JSON / Clash 用: 排除这两种格式在当前实现里表达不了的 ShadowTLS 节点
+sub_collect_uris_plain() {
+  sub_collect_uris | grep -v 'plugin=shadow-tls' || true
+}
+
 sub_build_universal() {
   ensure_dirs
   local out="${SUB_DIR}/sub-universal.txt" tmp
@@ -1784,8 +1789,8 @@ sub_build_singbox_json() {
     local ob
     ob=$(uri_to_singbox_outbound "$uri" || true)
     [[ -n $ob ]] || continue
-    jq --argjson ob "$ob" '.outbounds += [$ob]' "$tmp" > "${tmp}.n" && mv "${tmp}.n" "$tmp"
-  done < <(sub_collect_uris)
+  jq --argjson ob "$ob" '.outbounds += [$ob]' "$tmp" > "${tmp}.n" && mv "${tmp}.n" "$tmp"
+  done < <(sub_collect_uris_plain)
   json_validate "$tmp" || { rm -f "$tmp"; die "生成 sing-box 订阅 JSON 失败。"; }
   atomic_install "$tmp" "$out" 600
   rm -f "$tmp"
@@ -1889,13 +1894,17 @@ uri_to_singbox_outbound() {
 sub_build_clash_yaml() {
   ensure_dirs
   local out="${SUB_DIR}/sub-clash.yaml" tmp
+  if [[ -z $(sub_collect_uris_plain) ]]; then
+    warn "没有 Clash 可表达的节点 (ShadowTLS 节点已跳过), 未生成 Clash 订阅。"
+    return 1
+  fi
   tmp=$(mktemp)
   {
     printf 'proxies:\n'
     while IFS= read -r uri; do
       [[ -z $uri ]] && continue
-      clash_proxy_yaml_from_uri "$uri" || true
-    done < <(sub_collect_uris)
+            clash_proxy_yaml_from_uri "$uri" || true
+    done < <(sub_collect_uris_plain)
     printf 'proxy-groups:\n'
     printf '  - name: PROXY\n'
     printf '    type: select\n'
@@ -1905,8 +1914,8 @@ sub_build_clash_yaml() {
       local name
       name=$(printf '%s' "$uri" | sed -n 's/.*#\(.*\)$/\1/p')
       name=$(python3 -c "import urllib.parse,sys; print(urllib.parse.unquote(sys.argv[1]))" "${name:-node}" 2>/dev/null || printf '%s' "${name:-node}")
-      printf '      - "%s"\n' "$name"
-    done < <(sub_collect_uris)
+    printf '      - "%s"\n' "$name"
+    done < <(sub_collect_uris_plain)
     printf 'rules:\n  - MATCH,PROXY\n'
   } > "$tmp"
   atomic_install "$tmp" "$out" 600
@@ -2113,7 +2122,8 @@ remove_inbound() {
   local candidate
   candidate=$(mktemp)
   jq --arg tag "$tag" '
-    .inbounds |= map(select(.tag != $tag)) |
+    ([.inbounds[]? | select(.tag == $tag) | .detour // empty]) as $detours |
+    .inbounds |= map(select(.tag != $tag and ((.tag | IN($detours[])) | not))) |
     if .route.rules then .route.rules |= map(select((.inbound // []) | index($tag) | not)) else . end
   ' "$CONFIG_FILE" > "$candidate"
   apply_candidate "$candidate"
@@ -2134,9 +2144,9 @@ remove_inbound() {
 # config 里的 .type 做一次判断
 _inbound_protocols() {
   case "$1" in
-    hysteria2|tuic) echo udp ;;
-    shadowsocks)    echo "tcp udp" ;;
-    *)              echo tcp ;;
+    hysteria2*|tuic*) printf 'udp\n' ;;
+    shadowsocks*)     printf 'tcp\nudp\n' ;;
+    *)                printf 'tcp\n' ;;
   esac
 }
 
@@ -2289,9 +2299,9 @@ rename_node() {
 # 按协议类型返回需要放行的传输层协议
 _type_protocols() {
   case "$1" in
-    hysteria2*|tuic*) echo udp ;;
-    shadowsocks*)     echo "tcp udp" ;;
-    *)                echo tcp ;;
+    hysteria2*|tuic*) printf 'udp\n' ;;
+    shadowsocks*)     printf 'tcp\nudp\n' ;;
+    *)                printf 'tcp\n' ;;
   esac
 }
 
