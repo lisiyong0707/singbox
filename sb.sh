@@ -2546,7 +2546,7 @@ print_menu() {
   check_ipv4_egress && v4_tag="[IPv4正常]"
   check_ipv6_egress && v6_tag="[IPv6正常]"
   printf '\n%s\n' '=================================================='
-  printf ' sing-box VPS 双栈智能管理 v%s %s %s\n' "$SCRIPT_VERSION" "$v4_tag" "$v6_tag"
+  printf ' singbox VPS 小李的双栈智能管理 v%s %s %s\n' "$SCRIPT_VERSION" "$v4_tag" "$v6_tag"
   printf '%s\n' '=================================================='
   printf ' [VLESS Reality 专项节点]\n'
   printf '  1) 新建 VLESS Reality Dual (双栈智能推荐)\n'
