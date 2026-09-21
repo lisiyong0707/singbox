@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# sing-box-vps :: 小李的singbox VPS ai双栈智能管理脚本0.0.0
+# sing-box-vps :: 小李的singbox VPS ai双栈智能管理脚本0.0.1
 # Repository : https://github.com/lisiyong0707/singbox
 #
 # 功能总览:
@@ -1175,6 +1175,30 @@ deploy_tuic() {
   ok "TUIC (${D_MODE}) 已部署"
   print_result_block "TUIC" "$uri" "$D_TAG"
 }
+
+deploy_anytls() {
+  ensure_installed
+  deploy_prepare_tls_domain 8443 "anytls" || return 0
+
+  local paths cert key password tls inbound uri flag node_name
+  paths=$(obtain_tls_paths "$D_HOST")
+  cert=${paths%%|*}; key=${paths#*|}
+  password=$(random_token)
+  node_name=$(ask_node_name "AnyTLS-${D_MODE}")
+
+  tls=$(tls_json "$D_HOST" "$cert" "$key" | jq -c 'del(.alpn)')
+  inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg password "$password" --argjson tls "$tls" \
+    '{type:"anytls",tag:$tag,listen:$listen,listen_port:$port,users:[{name:"default",password:$password}],tls:$tls}')
+  apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
+
+  flag=$(get_server_flag)
+  uri="anytls://${password}@${D_FORMATTED_HOST}:${D_PORT}?sni=${D_HOST}#${flag}%20${node_name}"
+  save_connection "anytls-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
+  open_firewall_port "$D_PORT" tcp
+  ok "AnyTLS (${D_MODE}) 已部署"
+  print_result_block "AnyTLS" "$uri" "$D_TAG"
+}
+
 # ===========================================================================
 # Cloudflare Tunnel (config.yml + ingress, 而非仅 quick "service install")
 # ===========================================================================
@@ -1665,9 +1689,25 @@ diag_check_singbox() {
   fi
 }
 
+diag_check_resources() {
+  printf '\n[系统资源]\n'
+  local pct ipct
+  df -h / | awk 'NR==2{printf "  磁盘 /: 已用 %s / %s (%s)\n",$3,$2,$5}'
+  pct=$(df --output=pcent / | tail -n1 | tr -dc '0-9')
+  ipct=$(df --output=ipcent / | tail -n1 | tr -dc '0-9')
+  (( ${pct:-0} < 90 ))  || printf "  ${RED}磁盘使用率 >= 90%%, 请清理${NC}\n"
+  (( ${ipct:-0} < 90 )) || printf "  ${RED}inode 使用率 >= 90%%${NC}\n"
+  free -m | awk '/^Mem:/{printf "  内存: 已用 %s MB / 共 %s MB, 可用 %s MB\n",$3,$2,$7}
+                 /^Swap:/{printf "  Swap: 已用 %s MB / 共 %s MB\n",$3,$2}'
+  printf '  负载: %s (CPU 核数 %s)\n' "$(cut -d' ' -f1-3 /proc/loadavg)" "$(nproc)"
+  printf '  sing-box 内存: %s\n' "$(systemctl show sing-box -p MemoryCurrent --value 2>/dev/null | awk '{ if ($1 ~ /^[0-9]+$/) printf "%.1f MB", $1/1048576; else print "未知" }')"
+  printf '  时间同步: %s\n' "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo 未知)"
+}
+
 run_diagnostics() {
   ensure_installed
   title "系统诊断"
+  diag_check_resources
   diag_check_ports
   diag_check_dns
   diag_check_network
@@ -1812,6 +1852,15 @@ uri_to_singbox_outbound() {
         '{type:"tuic", tag:$tag, server:$host, server_port:$port, uuid:$uuid, password:$password,
           congestion_control:"bbr", tls:{enabled:true, server_name:$sni}}' 2>/dev/null
       ;;
+          anytls)
+      local password hostport query host port sni
+      password=${rest%%@*}; rest=${rest#*@}
+      hostport=${rest%%\?*}; query=${rest#*\?}; query=${query%%#*}
+      host=${hostport%:*}; port=${hostport##*:}
+      sni=$(printf '%s' "$query" | grep -oE 'sni=[^&]*' | cut -d= -f2)
+      jq -n --arg tag "$tag" --arg host "$host" --argjson port "${port:-443}" --arg password "$password" --arg sni "$sni" \
+        '{type:"anytls", tag:$tag, server:$host, server_port:$port, password:$password, tls:{enabled:true, server_name:$sni}}' 2>/dev/null
+      ;;
     *) return 1 ;;
   esac
 }
@@ -1911,6 +1960,15 @@ clash_proxy_yaml_from_uri() {
       sni=$(printf '%s' "$query" | grep -oE 'sni=[^&]*' | cut -d= -f2)
       printf '  - name: "%s"\n    type: tuic\n    server: %s\n    port: %s\n    uuid: %s\n    password: "%s"\n    sni: %s\n    congestion-controller: bbr\n' \
         "$name" "$host" "$port" "$uuid" "$password" "$sni"
+      ;;
+          anytls)
+      local password hostport query host port sni
+      password=${rest%%@*}; rest=${rest#*@}
+      hostport=${rest%%\?*}; query=${rest#*\?}; query=${query%%#*}
+      host=${hostport%:*}; port=${hostport##*:}
+      sni=$(printf '%s' "$query" | grep -oE 'sni=[^&]*' | cut -d= -f2)
+      printf '  - name: "%s"\n    type: anytls\n    server: %s\n    port: %s\n    password: "%s"\n    sni: %s\n    client-fingerprint: chrome\n' \
+        "$name" "$host" "$port" "$password" "$sni"
       ;;
   esac
 }
@@ -2048,6 +2106,17 @@ remove_inbound() {
   atomic_json_update "$STATE_FILE" '.connections |= map(select(.tag != $tag))' --arg tag "$tag" || true
   ok "已成功删除 ${tag} 并同步更新路由。"
 }
+
+_conn_field() {  # _conn_field <tag> <字段名>
+  jq -r --arg t "$1" --arg f "$2" '.connections[]|select(.tag==$t)|.[$f]|tostring' "$STATE_FILE"
+}
+
+_conn_save() {   # _conn_save <tag> <新uri> <新host>
+  atomic_json_update "$STATE_FILE" \
+    '(.connections[]|select(.tag==$t)) |= (.uri=$u | .host=$h)' \
+    --arg t "$1" --arg u "$2" --arg h "$3"
+}
+
 pick_connection_tag() {
   local -a tags=(); local i idx
   mapfile -t tags < <(jq -r '.connections[].tag' "$STATE_FILE")
@@ -2109,15 +2178,98 @@ change_node_port() {
   print_result_block "$tag" "$new_uri" "$tag"
 }
 
+# 只改客户端连接地址 (IP/域名), 不动服务端配置, 适合换 IP、加 CDN 域名
+change_node_host() {
+  ensure_dirs
+  local tag type old_uri new_host new_fmt new_uri
+  tag=$(pick_connection_tag) || return 0
+  type=$(_conn_field "$tag" type)
+  if [[ $type == vless-ws-cloudflare-tunnel ]]; then
+    warn "Tunnel 节点的域名绑定在 Cloudflare 后台, 请删除后重建。"; return 0
+  fi
+  old_uri=$(_conn_field "$tag" uri)
+  read -r -p "新的客户端连接地址 (IP 或域名): " new_host
+  if ! { valid_ipv4 "$new_host" || valid_ipv6 "$new_host" || valid_hostname "$new_host"; }; then
+    warn "地址格式不正确。"; return 0
+  fi
+  new_fmt=$(format_host_uri "$new_host")
+  new_uri=$(printf '%s' "$old_uri" | sed -E "s~^([A-Za-z0-9]+://[^@]*@)(\[[^]]*\]|[^:/?#]+)~\1${new_fmt}~")
+  _conn_save "$tag" "$new_uri" "$new_host"
+  ok "连接地址已更新, 请重新导入客户端 / 刷新订阅。"
+  print_result_block "$tag" "$new_uri" "$tag"
+}
+
+# 改 Reality / ShadowTLS 的握手伪装域名
+change_reality_domain() {
+  ensure_installed
+  local tag type old_dom new_dom old_uri new_uri candidate filter
+  tag=$(pick_connection_tag) || return 0
+  type=$(_conn_field "$tag" type)
+  case $type in
+    vless-reality*)
+      filter='(.inbounds[]|select(.tag==$t)|.tls) |= (.server_name=$d | .reality.handshake.server=$d)'
+      old_dom=$(jq -r --arg t "$tag" '.inbounds[]|select(.tag==$t)|.tls.server_name' "$CONFIG_FILE") ;;
+    shadowtls*)
+      filter='(.inbounds[]|select(.tag==$t)|.handshake.server) = $d'
+      old_dom=$(jq -r --arg t "$tag" '.inbounds[]|select(.tag==$t)|.handshake.server' "$CONFIG_FILE") ;;
+    *) warn "该节点不是 Reality / ShadowTLS 类型。"; return 0 ;;
+  esac
+  [[ -n $old_dom ]] || { warn "读取原握手域名失败。"; return 0; }
+  new_dom=$(ask_reality_handshake_domain)
+  [[ $new_dom != "$old_dom" ]] || return 0
+
+  candidate=$(mktemp)
+  jq --arg t "$tag" --arg d "$new_dom" "$filter" "$CONFIG_FILE" > "$candidate"
+  apply_candidate "$candidate"; rm -f "$candidate"
+
+  old_uri=$(_conn_field "$tag" uri)
+  new_uri=${old_uri//"$old_dom"/"$new_dom"}
+  _conn_save "$tag" "$new_uri" "$(_conn_field "$tag" host)"
+  ok "握手域名已由 ${old_dom} 改为 ${new_dom}。"
+  print_result_block "$tag" "$new_uri" "$tag"
+}
+
+# 改 TLS 类节点的域名 (会为新域名申请/选择证书)
+change_tls_domain() {
+  ensure_installed
+  local tag type old_dom new_dom paths cert key candidate old_uri new_uri
+  tag=$(pick_connection_tag) || return 0
+  type=$(_conn_field "$tag" type)
+  case $type in
+    trojan*|vless-tls*|hysteria2*|tuic*|anytls*) ;;
+    *) warn "该节点不是 TLS 证书类节点。"; return 0 ;;
+  esac
+  old_dom=$(jq -r --arg t "$tag" '.inbounds[]|select(.tag==$t)|.tls.server_name' "$CONFIG_FILE")
+  new_dom=$(ask_hostname "新的 TLS 域名 (需已解析到本机)")
+  [[ $new_dom != "$old_dom" ]] || return 0
+  paths=$(obtain_tls_paths "$new_dom")
+  cert=${paths%%|*}; key=${paths#*|}
+
+  candidate=$(mktemp)
+  jq --arg t "$tag" --arg d "$new_dom" --arg c "$cert" --arg k "$key" \
+    '(.inbounds[]|select(.tag==$t)|.tls) |= (.server_name=$d | .certificate_path=$c | .key_path=$k)' \
+    "$CONFIG_FILE" > "$candidate"
+  apply_candidate "$candidate"; rm -f "$candidate"
+
+  old_uri=$(_conn_field "$tag" uri)
+  new_uri=${old_uri//"$old_dom"/"$new_dom"}
+  _conn_save "$tag" "$new_uri" "$new_dom"
+  ok "TLS 域名已由 ${old_dom} 改为 ${new_dom}。旧证书文件未删除。"
+  print_result_block "$tag" "$new_uri" "$tag"
+}
+
 node_edit_menu() {
   local choice
   while true; do
     title "编辑节点"
-    printf '  1) 重命名节点\n  2) 修改监听端口\n  0) 返回主菜单\n'
+        printf '  1) 重命名节点\n  2) 修改监听端口\n  3) 修改客户端连接地址\n  4) 修改握手域名 (Reality/ShadowTLS)\n  5) 修改 TLS 域名 (Trojan/VLESS TLS/Hy2/TUIC/AnyTLS)\n  0) 返回主菜单\n'
     read -r -p '请选择: ' choice
     case $choice in
       1) rename_node ;;
       2) change_node_port ;;
+      3) change_node_host ;;
+      4) change_reality_domain ;;
+      5) change_tls_domain ;;
       0) return 0 ;;
       *) warn "无效的编号选择。" ;;
     esac
@@ -2283,6 +2435,7 @@ print_menu() {
   printf ' 28) 从 GitHub 更新本脚本\n'
   printf ' 29) 卸载 sing-box\n'
   printf ' 30) 编辑节点 (改名 / 改端口)\n'
+  printf ' 31) 新建 AnyTLS + TLS 入站\n'
   printf '  0) 退出\n\n'
 }
 
@@ -2322,6 +2475,7 @@ menu() {
       28) update_manager ;;
       29) uninstall_sing_box ;;
       30) node_edit_menu ;;
+      31) deploy_anytls ;;
       0) exit 0 ;;
       *) warn "无效的编号选择。" ;;
     esac
@@ -2342,6 +2496,7 @@ usage() {
   vless           部署 VLESS TLS
   hy2             部署 Hysteria2
   tuic            部署 TUIC v5
+  anytls          部署 AnyTLS
   cftunnel        Cloudflare Tunnel 管理菜单
   warp            Cloudflare WARP 管理菜单
   sub             订阅系统管理菜单
@@ -2396,6 +2551,7 @@ main() {
     vless) deploy_vless ;;
     hy2) deploy_hysteria2 ;;
     tuic) deploy_tuic ;;
+    anytls) deploy_anytls ;;
     status) show_status ;;
     links) show_connections ;;
     qrcode) show_connection_qrcode ;;
