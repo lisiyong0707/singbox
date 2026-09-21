@@ -1432,7 +1432,10 @@ cf_tunnel_status() {
   fi
   cloudflared --version
   systemctl --no-pager --full status cloudflared || true
-  [[ -f $CF_CONFIG_FILE ]] && { printf '\n当前 ingress 配置:\n'; cat "$CF_CONFIG_FILE"; }
+    if [[ -f $CF_CONFIG_FILE ]]; then
+    printf '\n当前 ingress 配置:\n'
+    cat "$CF_CONFIG_FILE"
+  fi
 }
 
 cf_tunnel_logs() { journalctl -u cloudflared -n 150 --no-pager -o cat; }
