@@ -2128,6 +2128,132 @@ remove_inbound() {
   ok "已成功删除 ${tag} 并同步更新路由。"
 }
 
+# 按 inbound.type (config.json 里的字段) 返回需要放行的传输层协议,
+# 与 _type_protocols (按 connections.json 的 type 字段) 是同一套映射,
+# 但 reconcile 阶段可能连 connections.json 记录都还没有, 所以单独按
+# config 里的 .type 做一次判断
+_inbound_protocols() {
+  case "$1" in
+    hysteria2|tuic) echo udp ;;
+    shadowsocks)    echo "tcp udp" ;;
+    *)              echo tcp ;;
+  esac
+}
+
+# 探测某个端口/协议当前是否已经在防火墙层放行, 兼容 ufw/firewalld/iptables
+# 三种后端, 与 open_firewall_port() 判断"用哪个后端"的逻辑保持一致
+_fw_port_allowed() {
+  local port=$1 protocol=$2
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+    ufw status 2>/dev/null | grep -qE "^${port}/${protocol}[[:space:]].*ALLOW"
+    return $?
+  fi
+  if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+    firewall-cmd --list-ports 2>/dev/null | tr ' ' '\n' | grep -qx "${port}/${protocol}"
+    return $?
+  fi
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null
+    return $?
+  fi
+  return 1
+}
+
+# 检查并修复孤儿节点: 
+#   1) config.json 里的 inbound tag <-> connections.json 里的 tag 对账
+#   2) 每个监听中的入站, 检查其端口/协议是否真的在防火墙层放行
+# 全程只报告, 发现问题后逐项 confirm 才会真正改动, 不做静默清理
+reconcile_nodes() {
+  ensure_installed
+  title "检查并修复孤儿节点 (reconcile)"
+
+  local -a inbound_tags=() conn_tags=()
+  mapfile -t inbound_tags < <(jq -r '.inbounds[]?.tag' "$CONFIG_FILE" 2>/dev/null)
+  mapfile -t conn_tags < <(jq -r '.connections[]?.tag' "$STATE_FILE" 2>/dev/null)
+
+  local -a orphan_inbounds=() orphan_conns=()
+  local t c found
+
+  # config 里有 inbound, 但 connections.json 里找不到对应记录
+  # (典型场景: 部署过程中被 SIGINT/SIGTERM 打断, PENDING_TAG 提示过的那种情况)
+  for t in "${inbound_tags[@]}"; do
+    found=0
+    for c in "${conn_tags[@]}"; do [[ $t == "$c" ]] && { found=1; break; }; done
+    (( found == 0 )) && orphan_inbounds+=("$t")
+  done
+
+  # connections.json 里有记录, 但 config 里已经没有对应 inbound 了
+  # (典型场景: 手动删过 inbound 但连接记录没跟着清理, 或本函数上一次没清理完)
+  for t in "${conn_tags[@]}"; do
+    found=0
+    for c in "${inbound_tags[@]}"; do [[ $t == "$c" ]] && { found=1; break; }; done
+    (( found == 0 )) && orphan_conns+=("$t")
+  done
+
+  if (( ${#orphan_inbounds[@]} == 0 && ${#orphan_conns[@]} == 0 )); then
+    ok "未发现孤儿节点, config.json 与 connections.json 对账一致。"
+  fi
+
+  # --- 处理孤儿 inbound (config 有, 连接记录没有) ---
+  for t in "${orphan_inbounds[@]}"; do
+    warn "孤儿入站: [${t}] 存在于 config.json, 但没有对应的连接记录。"
+    if confirm "是否删除该入站节点及其分流规则 (等同于 remove_inbound)" N; then
+      local listen_port
+      listen_port=$(jq -r --arg tag "$t" '.inbounds[] | select(.tag == $tag) | .listen_port // empty' "$CONFIG_FILE")
+      local candidate
+      candidate=$(mktemp)
+      jq --arg tag "$t" '
+        .inbounds |= map(select(.tag != $tag)) |
+        if .route.rules then .route.rules |= map(select((.inbound // []) | index($tag) | not)) else . end
+      ' "$CONFIG_FILE" > "$candidate"
+      apply_candidate "$candidate"
+      rm -f "$candidate"
+      if [[ -n $listen_port ]]; then
+        close_firewall_port "$listen_port" tcp
+        close_firewall_port "$listen_port" udp
+      fi
+      ok "已删除孤儿入站 [${t}]。"
+    else
+      warn "已跳过 [${t}], 保留原样。"
+    fi
+  done
+
+  # --- 处理孤儿连接记录 (connections.json 有, inbound 没有) ---
+  for t in "${orphan_conns[@]}"; do
+    warn "孤儿连接记录: [${t}] 存在于 connections.json, 但没有对应的 inbound。"
+    if confirm "是否清理该条连接记录" N; then
+      atomic_json_update "$STATE_FILE" '.connections |= map(select(.tag != $tag))' --arg tag "$t" \
+        && ok "已清理连接记录 [${t}]。"
+    else
+      warn "已跳过 [${t}], 保留原样。"
+    fi
+  done
+
+  # --- 防火墙对账: 每个非 127.0.0.1 监听的 inbound, 检查端口是否真的放行 ---
+  local -a fw_rows=()
+  mapfile -t fw_rows < <(jq -r '.inbounds[]? | select(.listen_port != null and .listen != "127.0.0.1") | "\(.tag)\t\(.type)\t\(.listen_port)"' "$CONFIG_FILE" 2>/dev/null)
+
+  local row tag type port proto missing=0
+  for row in "${fw_rows[@]}"; do
+    IFS=$'\t' read -r tag type port <<<"$row"
+    for proto in $(_inbound_protocols "$type"); do
+      if ! _fw_port_allowed "$port" "$proto"; then
+        missing=1
+        warn "防火墙缺口: 节点 [${tag}] 端口 ${port}/${proto} 未在防火墙层放行。"
+        if confirm "是否现在放行 ${port}/${proto}" Y; then
+          open_firewall_port "$port" "$proto"
+        else
+          warn "已跳过 ${port}/${proto}, 该端口可能无法从外部访问。"
+        fi
+      fi
+    done
+  done
+  (( missing == 0 )) && ok "防火墙对账正常, 所有监听端口均已放行。"
+
+  printf '\n'
+  ok "reconcile 检查完成。"
+}
+
 _conn_field() {  # _conn_field <tag> <字段名>
   jq -r --arg t "$1" --arg f "$2" '.connections[]|select(.tag==$t)|.[$f]|tostring' "$STATE_FILE"
 }
