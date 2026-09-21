@@ -327,8 +327,13 @@ format_host_uri() {
 
 get_server_flag() {
   local country
-  country=$(curl -4fsS --connect-timeout 2 --max-time 3 "https://ipapi.co/country/" 2>/dev/null | tr -d '[:space:]')
-  [[ $country =~ ^[A-Za-z]{2}$ ]] || country=$(curl -4fsS --connect-timeout 2 --max-time 3 "https://api.country.is/" 2>/dev/null | jq -r '.country // empty')
+  # 增加更多备用接口，最后兜底返回地球emoji
+  country=$(curl -4fsS --connect-timeout 3 --max-time 5 "https://ipapi.co/country/" 2>/dev/null | tr -d '[:space:]') \
+  || country=$(curl -4fsS --connect-timeout 3 --max-time 5 "https://api.country.is/" 2>/dev/null | jq -r '.country // empty' 2>/dev/null) \
+  || country=$(curl -4fsS --connect-timeout 3 --max-time 5 "https://ipinfo.io/country" 2>/dev/null | tr -d '[:space:]') \
+  || country=$(curl -4fsS --connect-timeout 3 --max-time 5 "https://ip.sb/geoip" 2>/dev/null | jq -r '.country_code // empty' 2>/dev/null) \
+  || country=""
+
   if [[ $country =~ ^[A-Za-z]{2}$ ]]; then
     python3 -c "c='$country'.upper();print(''.join(chr(0x1F1E6+ord(x)-65) for x in c))"
   else
