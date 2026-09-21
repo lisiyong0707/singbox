@@ -2434,7 +2434,7 @@ print_menu() {
   printf ' 27) 更新 sing-box 核心\n'
   printf ' 28) 从 GitHub 更新本脚本\n'
   printf ' 29) 卸载 sing-box\n'
-  printf ' 30) 编辑节点 (改名 / 改端口)\n'
+  printf ' 30) 编辑节点 (改名 / 改端口 / 改地址 / 改域名)\n'
   printf ' 31) 新建 AnyTLS + TLS 入站\n'
   printf '  0) 退出\n\n'
 }
