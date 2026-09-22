@@ -64,7 +64,7 @@ readonly REALITY_PRESET_DOMAINS=(
 # 颜色与日志
 # ---------------------------------------------------------------------------
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; MAGENTA='\033[0;35m'; BOLD='\033[1m'; NC='\033[0m'
 
 _log_raw() {
   # 日志文件不含颜色转义, 便于后续 grep/诊断
@@ -2724,26 +2724,26 @@ print_menu() {
   printf '\n%s\n' '=================================================='
   printf ' singbox VPS 小李的双栈智能管理 v%s %s %s\n' "$SCRIPT_VERSION" "$v4_tag" "$v6_tag"
   printf '%s\n' '=================================================='
-  printf ' [VLESS Reality 专项节点]\n'
+  printf " ${GREEN}[VLESS Reality 专项节点]${NC}\n"
   printf '  1) 新建 VLESS Reality Dual (双栈智能推荐)\n'
   printf '  2) 新建 VLESS Reality IPv4 (出口强制 IPv4)\n'
   printf '  3) 新建 VLESS Reality IPv6 (出口优先 IPv6 / 回退 IPv4)\n\n'
-  printf ' [高隐蔽 / 抗封锁 / 穿透节点]\n'
+  printf " ${YELLOW}[高隐蔽 / 抗封锁 / 穿透节点]${NC}\n"
   printf '  4) 新建 VLESS Reality gRPC (云原生特征 / 多路复用)\n'
   printf '  5) 新建 ShadowTLS v3 + SS2022\n'
   printf '  6) Cloudflare Tunnel 管理 (新建 / 状态 / 日志 / 重启 / 卸载)\n\n'
-  printf ' [经典协议入站]\n'
+  printf " ${BLUE}[经典协议入站]${NC}\n"
   printf '  7) 新建 Shadowsocks 2022 入站\n'
   printf '  8) 新建 Trojan + TLS 入站\n'
   printf '  9) 新建 VLESS + TLS 入站\n'
   printf ' 10) 新建 Hysteria2 + TLS 入站\n'
   printf ' 11) 新建 TUIC v5 入站\n'
   printf ' 12) 新建 AnyTLS + TLS 入站\n\n'
-  printf ' [订阅 / WARP / 测速]\n'
+  printf " ${CYAN}[订阅 / WARP / 测速]${NC}\n"
   printf ' 13) 订阅系统管理\n'
   printf ' 14) Cloudflare WARP 管理\n'
   printf ' 15) 服务器测速\n\n'
-  printf ' [管理与运维]\n'
+  printf " ${MAGENTA}[管理与运维]${NC}\n"
   printf ' 16) 查看客户端连接串\n'
   printf ' 17) 查看节点二维码\n'
   printf ' 18) 删除入站节点 (联动清理分流路由)\n'
