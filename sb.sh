@@ -1873,6 +1873,7 @@ uri_to_singbox_outbound() {
       stype=$(printf '%s' "$query" | grep -oE 'type=[^&]*' | cut -d= -f2)
       svc=$(printf '%s' "$query" | grep -oE 'serviceName=[^&]*' | cut -d= -f2)
       path=$(printf '%s' "$query" | grep -oE 'path=[^&]*' | cut -d= -f2)
+      path=$(python3 -c "import urllib.parse,sys; print(urllib.parse.unquote(sys.argv[1]))" "${path:-/}" 2>/dev/null || printf '%s' "${path:-/}")
       jq -n --arg tag "$tag" --arg host "$host" --argjson port "${port:-443}" --arg uuid "$uuid" \
         --arg security "$security" --arg sni "$sni" --arg pbk "$pbk" --arg sid "$sid" --arg flow "$flow" \
         --arg stype "$stype" --arg svc "$svc" --arg path "$path" '
@@ -1984,7 +1985,7 @@ clash_proxy_yaml_from_uri() {
   name=$(python3 -c "import urllib.parse,sys; print(urllib.parse.unquote(sys.argv[1]))" "${name:-node}" 2>/dev/null || printf '%s' "${name:-node}")
   case "$scheme" in
     vless)
-      local userinfo hostport query uuid host port sni pbk sid flow security stype svc path
+      local userinfo hostport query uuid host port sni pbk sid flow security stype svc path host_hdr
       userinfo=${rest%%@*}; rest=${rest#*@}
       hostport=${rest%%\?*}; query=${rest#*\?}; query=${query%%#*}
       uuid=$userinfo; host=${hostport%:*}; port=${hostport##*:}
@@ -1995,6 +1996,9 @@ clash_proxy_yaml_from_uri() {
       flow=$(printf '%s' "$query" | grep -oE 'flow=[^&]*' | cut -d= -f2)
       stype=$(printf '%s' "$query" | grep -oE 'type=[^&]*' | cut -d= -f2)
       svc=$(printf '%s' "$query" | grep -oE 'serviceName=[^&]*' | cut -d= -f2)
+      path=$(printf '%s' "$query" | grep -oE 'path=[^&]*' | cut -d= -f2)
+      path=$(python3 -c "import urllib.parse,sys; print(urllib.parse.unquote(sys.argv[1]))" "${path:-/}" 2>/dev/null || printf '%s' "${path:-/}")
+      host_hdr=$(printf '%s' "$query" | grep -oE 'host=[^&]*' | cut -d= -f2)
       printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n    network: %s\n' \
         "$name" "$host" "$port" "$uuid" "${stype:-tcp}"
       [[ -n $flow ]] && printf '    flow: %s\n' "$flow"
@@ -2005,6 +2009,7 @@ clash_proxy_yaml_from_uri() {
         printf '    tls: true\n    servername: %s\n' "$sni"
       fi
       [[ $stype == grpc ]] && printf '    grpc-opts:\n      grpc-service-name: %s\n' "$svc"
+      [[ $stype == ws ]] && printf '    ws-opts:\n      path: "%s"\n      headers:\n        Host: %s\n' "$path" "${host_hdr:-$sni}"
       ;;
     trojan)
       local password hostport query host port sni
