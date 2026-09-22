@@ -1486,6 +1486,7 @@ cf_tunnel_menu() {
     printf '  5) 停止\n'
     printf '  6) 重新绑定 Token\n'
     printf '  7) 卸载\n'
+    printf '  8) 检查 / 升级 cloudflared 版本\n'
     printf '  0) 返回主菜单\n'
     read -r -p '请选择: ' choice
     case $choice in
@@ -1496,6 +1497,7 @@ cf_tunnel_menu() {
       5) cf_tunnel_stop ;;
       6) cf_tunnel_rebind_token ;;
       7) cf_tunnel_uninstall ;;
+      8) upgrade_cloudflared ;;
       0) return 0 ;;
       *) warn "无效的编号选择。" ;;
     esac
@@ -1613,6 +1615,104 @@ uninstall_warp() {
   atomic_json_update "$CONFIG_FILE" '.outbounds |= map(select(.tag != $tag))' --arg tag "$WARP_OUTBOUND_TAG" || true
   systemctl restart sing-box 2>/dev/null || true
   ok "WARP 已卸载。"
+}
+
+# ===========================================================================
+# cloudflared 自身版本管理 (与 sing-box 核心版本管理相互独立)
+# 判断当前 cloudflared 是通过 APT 源安装还是脚本自行下载的二进制安装,
+# 这两种方式的升级路径完全不同, 混用会导致状态不一致, 因此每次升级前
+# 都重新探测一次, 不做缓存。
+# ---------------------------------------------------------------------------
+readonly CLOUDFLARED_BIN_URL_BASE="https://github.com/cloudflare/cloudflared/releases/latest/download"
+
+_cloudflared_install_method() {
+  # 输出: apt | binary | none
+  if ! command -v cloudflared >/dev/null 2>&1; then
+    printf 'none'
+    return 0
+  fi
+  if dpkg -S "$(command -v cloudflared)" >/dev/null 2>&1; then
+    printf 'apt'
+  else
+    printf 'binary'
+  fi
+}
+
+_cloudflared_current_version() {
+  command -v cloudflared >/dev/null 2>&1 || { printf ''; return 0; }
+  cloudflared --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1
+}
+
+_cloudflared_latest_version() {
+  # 通过 GitHub Releases API 探测最新版本号, 探测失败不阻断流程 (可能网络
+  # 问题或被限流), 调用方需自行处理空字符串的情况
+  curl -fsS --connect-timeout 5 --max-time 8 \
+    "https://api.github.com/repos/cloudflare/cloudflared/releases/latest" 2>/dev/null \
+    | jq -r '.tag_name // empty' 2>/dev/null | sed 's/^v//'
+}
+
+upgrade_cloudflared() {
+  if ! command -v cloudflared >/dev/null 2>&1; then
+    warn "cloudflared 尚未安装, 请先在 Cloudflare Tunnel 菜单里新建一个 Tunnel 节点完成安装。"
+    return 0
+  fi
+
+  local method cur latest was_active
+  method=$(_cloudflared_install_method)
+  cur=$(_cloudflared_current_version)
+  latest=$(_cloudflared_latest_version)
+
+  printf '\n当前 cloudflared 版本: %s (安装方式: %s)\n' "${cur:-未知}" "$method"
+  if [[ -n $latest ]]; then
+    printf 'GitHub 最新版本: %s\n' "$latest"
+    if [[ -n $cur ]] && version_ge "$cur" "$latest"; then
+      ok "已是最新版本, 无需升级。"
+      return 0
+    fi
+  else
+    warn "无法从 GitHub 获取最新版本号 (可能是网络限制), 将继续按当前安装方式尝试升级。"
+  fi
+
+  was_active=0
+  systemctl is-active --quiet cloudflared 2>/dev/null && was_active=1
+
+  case "$method" in
+    apt)
+      info "通过 APT 升级 cloudflared..."
+      if ! apt-get update -qq 2>>"$LOG_FILE"; then
+        warn "apt-get update 部分软件源同步失败 (详见 ${LOG_FILE}), 若是第三方源导致, 通常不影响 cloudflared 官方源本身, 继续尝试升级..."
+      fi
+      apt-get install -y -qq --only-upgrade cloudflared
+      ;;
+    binary)
+      info "通过二进制方式升级 cloudflared..."
+      local arch bin_url tmp_bin
+      arch=$(uname -m)
+      case "$arch" in
+        x86_64)  bin_url="${CLOUDFLARED_BIN_URL_BASE}/cloudflared-linux-amd64" ;;
+        aarch64) bin_url="${CLOUDFLARED_BIN_URL_BASE}/cloudflared-linux-arm64" ;;
+        armv7l)  bin_url="${CLOUDFLARED_BIN_URL_BASE}/cloudflared-linux-arm" ;;
+        *) die "未知的 CPU 架构 (${arch}), 无法确定二进制下载地址。" ;;
+      esac
+      tmp_bin=$(mktemp)
+      if ! curl -fsSL --retry 3 --connect-timeout 15 "$bin_url" -o "$tmp_bin"; then
+        rm -f "$tmp_bin"
+        die "下载最新 cloudflared 二进制失败, 请检查网络连接。"
+      fi
+      [[ -s $tmp_bin ]] || { rm -f "$tmp_bin"; die "下载的二进制文件为空, 已拒绝安装。"; }
+      install -m 755 "$tmp_bin" /usr/local/bin/cloudflared
+      rm -f "$tmp_bin"
+      ;;
+    *)
+      die "内部错误: 无法识别 cloudflared 安装方式。"
+      ;;
+  esac
+
+  if (( was_active == 1 )); then
+    systemctl restart cloudflared || warn "cloudflared 重启失败, 请运行 'sb cftunnel' 查看状态与日志。"
+  fi
+
+  ok "cloudflared 升级完成: $(cloudflared --version 2>/dev/null | head -n1)"
 }
 
 warp_menu() {
@@ -2851,6 +2951,7 @@ usage() {
   bbr             启用 BBR
   rollback        恢复最近一次配置备份
   upgrade         更新 sing-box 核心
+  cf-upgrade      检查 / 升级 cloudflared 版本
   self-update     从 GitHub 更新本脚本
   edit            编辑节点 (改名/端口/地址/域名)
   uninstall       卸载 sing-box
@@ -2900,6 +3001,7 @@ main() {
     certs) cert_management_menu ;;
     self-update) update_manager ;;
     upgrade) upgrade_sing_box ;;
+    cf-upgrade) upgrade_cloudflared ;;
     bbr) enable_bbr ;;
     rollback) restore_backup ;;
     remove) remove_inbound ;;
