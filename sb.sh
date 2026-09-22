@@ -24,7 +24,7 @@ umask 077
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
-readonly SCRIPT_VERSION="0.0.1"
+readonly SCRIPT_VERSION="0.0.2"
 readonly SB_MIN_VERSION="1.12.0"
 
 readonly CONFIG_DIR="/etc/sing-box"
