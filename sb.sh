@@ -1264,31 +1264,25 @@ install_cloudflared() {
   info "配置 Cloudflare 官方 cloudflared APT 源"
   install -d -m 755 /usr/share/keyrings
 
-  # Cloudflare 已将官方签名密钥从旧的 cloudflare-main.gpg 迁移到
-  # cloudflare-public-v2.gpg (旧密钥文件对应的 key id 已不再对仓库生效,
-  # 继续使用旧文件会导致 apt-get update 报 NO_PUBKEY), 这里改用现行密钥文件名,
-  # 并保留格式探测逻辑作为兜底 (官方该文件目前是已经 dearmor 过的二进制格式,
-  # 不应再对其执行 gpg --dearmor, 否则会得到损坏的 keyring)。
+  # 修复：用 gpg --dearmor 确保密钥为正确的二进制格式
   local tmp_gpg
   tmp_gpg=$(mktemp)
   if curl -fsSL --retry 3 --connect-timeout 15 \
-      https://pkg.cloudflare.com/cloudflare-public-v2.gpg -o "$tmp_gpg"; then
+      https://pkg.cloudflare.com/cloudflare-main.gpg -o "$tmp_gpg"; then
     # 判断是否已是二进制格式，若是 ASCII armor 则转换
     if file "$tmp_gpg" 2>/dev/null | grep -qi "PGP public key block\|ASCII"; then
-      gpg --dearmor < "$tmp_gpg" > /usr/share/keyrings/cloudflare-public-v2.gpg
+      gpg --dearmor < "$tmp_gpg" > /usr/share/keyrings/cloudflare-main.gpg
     else
-      install -m 644 "$tmp_gpg" /usr/share/keyrings/cloudflare-public-v2.gpg
+      install -m 644 "$tmp_gpg" /usr/share/keyrings/cloudflare-main.gpg
     fi
     rm -f "$tmp_gpg"
   else
     rm -f "$tmp_gpg"
     die "无法下载 Cloudflare GPG 密钥，请检查网络连接"
   fi
-  # 清理可能残留的旧密钥文件, 避免和新文件混淆
-  rm -f /usr/share/keyrings/cloudflare-main.gpg
 
   tee /etc/apt/sources.list.d/cloudflared.list >/dev/null <<'EOF'
-deb [signed-by=/usr/share/keyrings/cloudflare-public-v2.gpg] https://pkg.cloudflare.com/cloudflared any main
+deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main
 EOF
 
   apt-get update -qq
@@ -2674,13 +2668,7 @@ EOF
 upgrade_sing_box() {
   ensure_installed
   info "更新 sing-box 软件包..."
-  # apt-get update 只要任意一个已配置的第三方源 (例如曾经装过的 cloudflared
-  # APT 源) GPG 密钥过期/失效, 整个命令就会以非零退出, 在 set -e 下会连累
-  # sing-box 官方源 (sagernet) 本身没问题也升级不了。这里不因此中断,
-  # 仅告警提示, 成功同步的源 (通常包含 sagernet) 其索引已经落盘可用。
-  if ! apt-get update -qq 2>>"$LOG_FILE"; then
-    warn "apt-get update 部分软件源同步失败 (详见 ${LOG_FILE}), 可能是第三方源 (如 cloudflared) GPG 密钥过期导致, 与 sing-box 官方源无关; 继续尝试升级..."
-  fi
+  apt-get update -qq
   apt-get install -y -qq --only-upgrade sing-box
   validate_and_restart
   ok "更新完成: $(sing-box version | head -n 1)"
@@ -2733,9 +2721,9 @@ print_menu() {
   local v4_tag="[无IPv4]" v6_tag="[无IPv6]"
   check_ipv4_egress && v4_tag="[IPv4正常]"
   check_ipv6_egress && v6_tag="[IPv6正常]"
-  printf '\n%s\n' '========================================================================'
+  printf '\n%s\n' '=================================================='
   printf ' singbox VPS 小李的双栈智能管理 v%s %s %s\n' "$SCRIPT_VERSION" "$v4_tag" "$v6_tag"
-  printf '%s\n' '=========================================================================='
+  printf '%s\n' '=================================================='
   printf " ${GREEN}[VLESS Reality 专项节点]${NC}\n"
   printf '  1) 新建 VLESS Reality Dual (双栈智能推荐)\n'
   printf '  2) 新建 VLESS Reality IPv4 (出口强制 IPv4)\n'
