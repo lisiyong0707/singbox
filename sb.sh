@@ -2733,9 +2733,9 @@ print_menu() {
   local v4_tag="[无IPv4]" v6_tag="[无IPv6]"
   check_ipv4_egress && v4_tag="[IPv4正常]"
   check_ipv6_egress && v6_tag="[IPv6正常]"
-  printf '\n%s\n' '=================================================='
+  printf '\n%s\n' '========================================================================'
   printf ' singbox VPS 小李的双栈智能管理 v%s %s %s\n' "$SCRIPT_VERSION" "$v4_tag" "$v6_tag"
-  printf '%s\n' '=================================================='
+  printf '%s\n' '=========================================================================='
   printf " ${GREEN}[VLESS Reality 专项节点]${NC}\n"
   printf '  1) 新建 VLESS Reality Dual (双栈智能推荐)\n'
   printf '  2) 新建 VLESS Reality IPv4 (出口强制 IPv4)\n'
