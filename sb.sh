@@ -952,6 +952,8 @@ print_result_block() {
   printf '\n%s 客户端连接串:\n%s\n' "$title" "$uri"
   show_qrcode "$uri" "$tag"
   printf '\n'
+  info "正在自动刷新订阅文件..."
+  sub_build_all || warn "订阅文件自动刷新失败, 可稍后运行 'sb sub' 手动刷新。"
 }
 
 # ---------------------------------------------------------------------------
