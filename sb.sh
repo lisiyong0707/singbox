@@ -2737,29 +2737,29 @@ print_menu() {
   printf '  8) 新建 Trojan + TLS 入站\n'
   printf '  9) 新建 VLESS + TLS 入站\n'
   printf ' 10) 新建 Hysteria2 + TLS 入站\n'
-  printf ' 11) 新建 TUIC v5 入站\n\n'
+  printf ' 11) 新建 TUIC v5 入站\n'
+  printf ' 12) 新建 AnyTLS + TLS 入站\n\n'
   printf ' [订阅 / WARP / 测速]\n'
-  printf ' 12) 订阅系统管理\n'
-  printf ' 13) Cloudflare WARP 管理\n'
-  printf ' 14) 服务器测速\n\n'
+  printf ' 13) 订阅系统管理\n'
+  printf ' 14) Cloudflare WARP 管理\n'
+  printf ' 15) 服务器测速\n\n'
   printf ' [管理与运维]\n'
-  printf ' 15) 查看客户端连接串\n'
-  printf ' 16) 查看节点二维码\n'
-  printf ' 17) 删除入站节点 (联动清理分流路由)\n'
-  printf ' 18) 查看服务状态与网络栈情况\n'
-  printf ' 19) 查看实时运行日志\n'
-  printf ' 20) 校验配置并重启服务\n'
-  printf ' 21) 系统健康检查\n'
-  printf ' 22) 系统诊断 (端口/DNS/BBR/防火墙/Tunnel/配置)\n'
-  printf ' 23) 证书管理\n'
-  printf ' 24) 启用 BBR 拥塞控制\n'
-  printf ' 25) 恢复最近一次配置备份\n'
-  printf ' 26) 安装 / 修复官方 sing-box 环境\n'
-  printf ' 27) 更新 sing-box 核心\n'
-  printf ' 28) 从 GitHub 更新本脚本\n'
-  printf ' 29) 卸载 sing-box\n'
-  printf ' 30) 编辑节点 (改名 / 改端口 / 改地址 / 改域名)\n'
-  printf ' 31) 新建 AnyTLS + TLS 入站\n'
+  printf ' 16) 查看客户端连接串\n'
+  printf ' 17) 查看节点二维码\n'
+  printf ' 18) 删除入站节点 (联动清理分流路由)\n'
+  printf ' 19) 查看服务状态与网络栈情况\n'
+  printf ' 20) 查看实时运行日志\n'
+  printf ' 21) 校验配置并重启服务\n'
+  printf ' 22) 系统健康检查\n'
+  printf ' 23) 系统诊断 (端口/DNS/BBR/防火墙/Tunnel/配置)\n'
+  printf ' 24) 证书管理\n'
+  printf ' 25) 启用 BBR 拥塞控制\n'
+  printf ' 26) 恢复最近一次配置备份\n'
+  printf ' 27) 安装 / 修复官方 sing-box 环境\n'
+  printf ' 28) 更新 sing-box 核心\n'
+  printf ' 29) 从 GitHub 更新本脚本\n'
+  printf ' 30) 卸载 sing-box\n'
+  printf ' 31) 编辑节点 (改名 / 改端口 / 改地址 / 改域名)\n'
   printf ' 32) 检查并修复孤儿节点 (reconcile)\n'
   printf '  0) 退出\n\n'
 }
@@ -2781,26 +2781,26 @@ menu() {
       9) deploy_vless ;;
       10) deploy_hysteria2 ;;
       11) deploy_tuic ;;
-      12) subscription_menu ;;
-      13) warp_menu ;;
-      14) run_speedtest ;;
-      15) show_connections ;;
-      16) show_connection_qrcode ;;
-      17) remove_inbound ;;
-      18) show_status ;;
-      19) show_logs ;;
-      20) validate_and_restart ;;
-      21) health_check ;;
-      22) run_diagnostics ;;
-      23) cert_management_menu ;;
-      24) enable_bbr ;;
-      25) restore_backup ;;
-      26) install_sing_box ;;
-      27) upgrade_sing_box ;;
-      28) update_manager ;;
-      29) uninstall_sing_box ;;
-      30) node_edit_menu ;;
-      31) deploy_anytls ;;
+      12) deploy_anytls ;;
+      13) subscription_menu ;;
+      14) warp_menu ;;
+      15) run_speedtest ;;
+      16) show_connections ;;
+      17) show_connection_qrcode ;;
+      18) remove_inbound ;;
+      19) show_status ;;
+      20) show_logs ;;
+      21) validate_and_restart ;;
+      22) health_check ;;
+      23) run_diagnostics ;;
+      24) cert_management_menu ;;
+      25) enable_bbr ;;
+      26) restore_backup ;;
+      27) install_sing_box ;;
+      28) upgrade_sing_box ;;
+      29) update_manager ;;
+      30) uninstall_sing_box ;;
+      31) node_edit_menu ;;
       32) reconcile_nodes ;;
       0) exit 0 ;;
       *) warn "无效的编号选择。" ;;
