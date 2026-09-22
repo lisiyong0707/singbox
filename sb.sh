@@ -1802,6 +1802,8 @@ run_diagnostics() {
 # 或直接用本机文件路径自行分发, 不强制暴露公网端口。
 # ===========================================================================
 readonly SUB_PORT_DEFAULT=28080
+readonly SUB_TOKEN_FILE="${STATE_DIR}/sub_token"
+readonly SUB_AUTH_SERVER="${STATE_DIR}/sub-server.py"
 
 sub_collect_uris() {
   jq -r '.connections[]?.uri' "$STATE_FILE" 2>/dev/null
@@ -2069,17 +2071,19 @@ sub_build_all() {
 
 sub_serve_start() {
   ensure_dirs
-  local port
+  local port token
   port=$(ask_port "本地订阅 HTTP 服务端口 (仅监听 127.0.0.1, 自行用 Nginx/Caddy 反代加 TLS)" "$SUB_PORT_DEFAULT")
+  write_sub_auth_server
+  token=$(ensure_sub_token)
   tee "$SUB_HTTPD_UNIT" >/dev/null <<EOF
 [Unit]
-Description=sing-box-vps subscription file server (127.0.0.1 only)
+Description=sing-box-vps subscription file server (127.0.0.1 only, token auth)
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=${SUB_DIR}
-ExecStart=/usr/bin/python3 -m http.server ${port} --bind 127.0.0.1
+ExecStart=/usr/bin/python3 ${SUB_AUTH_SERVER} ${port} ${SUB_DIR} ${SUB_TOKEN_FILE}
 Restart=on-failure
 User=root
 
@@ -2088,7 +2092,69 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable --now sing-box-vps-sub
-  ok "订阅服务已启动: http://127.0.0.1:${port}/ (请自行反代并加 TLS 后再对外提供)"
+  ok "订阅服务已启动 (已启用 token 校验)"
+  printf '本机访问: http://127.0.0.1:%s/?token=%s\n' "$port" "$token"
+  printf '对外域名示例: https://你的域名/sub-universal.txt?token=%s\n' "$token"
+}
+
+ensure_sub_token() {
+  ensure_dirs
+  if [[ ! -f $SUB_TOKEN_FILE ]]; then
+    openssl rand -hex 16 > "$SUB_TOKEN_FILE"
+    chmod 600 "$SUB_TOKEN_FILE"
+  fi
+  cat "$SUB_TOKEN_FILE"
+}
+
+regenerate_sub_token() {
+  ensure_dirs
+  openssl rand -hex 16 > "$SUB_TOKEN_FILE"
+  chmod 600 "$SUB_TOKEN_FILE"
+  systemctl restart sing-box-vps-sub 2>/dev/null || true
+  ok "订阅访问 token 已重置为: $(cat "$SUB_TOKEN_FILE")"
+  warn "旧链接已失效, 请用新 token 更新客户端订阅地址。"
+}
+
+write_sub_auth_server() {
+  tee "$SUB_AUTH_SERVER" >/dev/null <<'PYEOF'
+#!/usr/bin/env python3
+import http.server, socketserver, sys
+from urllib.parse import urlparse, parse_qs
+
+PORT = int(sys.argv[1])
+DIRECTORY = sys.argv[2]
+TOKEN_FILE = sys.argv[3]
+
+with open(TOKEN_FILE) as f:
+    TOKEN = f.read().strip()
+
+class AuthHandler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=DIRECTORY, **kwargs)
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        token = qs.get("token", [""])[0]
+        if token != TOKEN:
+            self.send_response(403)
+            self.end_headers()
+            self.wfile.write(b"Forbidden")
+            return
+        self.path = parsed.path
+        super().do_GET()
+
+    def list_directory(self, path):
+        self.send_error(403, "Directory listing disabled")
+        return None
+
+    def log_message(self, fmt, *args):
+        pass
+
+with socketserver.TCPServer(("127.0.0.1", PORT), AuthHandler) as httpd:
+    httpd.serve_forever()
+PYEOF
+  chmod 755 "$SUB_AUTH_SERVER"
 }
 
 sub_serve_stop() {
@@ -2105,6 +2171,7 @@ subscription_menu() {
     printf '  3) 启动本地订阅 HTTP 服务 (127.0.0.1)\n'
     printf '  4) 停止本地订阅 HTTP 服务\n'
     printf '  5) 删除全部订阅文件\n'
+    printf '  6) 查看 / 重置订阅访问 token\n'
     printf '  0) 返回主菜单\n'
     read -r -p '请选择: ' choice
     case $choice in
@@ -2113,6 +2180,15 @@ subscription_menu() {
       3) sub_serve_start ;;
       4) sub_serve_stop ;;
       5) confirm "确认删除全部订阅文件" N && rm -f "${SUB_DIR:?}"/* && ok "已清空订阅文件。" ;;
+      6)
+        if [[ -f $SUB_TOKEN_FILE ]]; then
+          printf '当前 token: %s\n' "$(cat "$SUB_TOKEN_FILE")"
+          confirm "是否重置 token (旧链接将立即失效)" N && regenerate_sub_token
+        else
+          ensure_sub_token >/dev/null
+          ok "已生成新 token: $(cat "$SUB_TOKEN_FILE")"
+        fi
+        ;;
       0) return 0 ;;
       *) warn "无效的编号选择。" ;;
     esac
