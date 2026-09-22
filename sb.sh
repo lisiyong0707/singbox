@@ -2098,8 +2098,9 @@ EOF
   systemctl daemon-reload
   systemctl enable --now sing-box-vps-sub
   ok "订阅服务已启动 (已启用 token 校验)"
-  printf '本机访问: http://127.0.0.1:%s/?token=%s\n' "$port" "$token"
-  printf '对外域名示例: https://你的域名/sub-universal.txt?token=%s\n' "$token"
+  printf '自适应订阅链接 (推荐, 根据客户端自动识别格式): http://127.0.0.1:%s/sub?token=%s\n' "$port" "$token"
+  printf '对外域名示例: https://你的域名/sub?token=%s\n' "$token"
+  printf '如需强制指定格式, 把 /sub 换成: /sub-clash.yaml (Clash/Mihomo) | /sub-singbox.json (sing-box) | /sub-universal.txt (v2rayN/Shadowrocket/NekoBox 等)\n'
 }
 
 ensure_sub_token() {
@@ -2123,7 +2124,7 @@ regenerate_sub_token() {
 write_sub_auth_server() {
   tee "$SUB_AUTH_SERVER" >/dev/null <<'PYEOF'
 #!/usr/bin/env python3
-import http.server, socketserver, sys
+import http.server, socketserver, sys, re, os
 from urllib.parse import urlparse, parse_qs
 
 PORT = int(sys.argv[1])
@@ -2132,6 +2133,10 @@ TOKEN_FILE = sys.argv[3]
 
 with open(TOKEN_FILE) as f:
     TOKEN = f.read().strip()
+
+CLASH_UA_RE = re.compile(r'(clash|mihomo|stash|verge|flclash)', re.I)
+SINGBOX_UA_RE = re.compile(r'(sing-?box|sfa|sfi|sfm)', re.I)
+AUTO_PATHS = ("/", "/sub", "/subscribe")
 
 class AuthHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -2146,8 +2151,36 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"Forbidden")
             return
+
+        if parsed.path in AUTO_PATHS:
+            ua = self.headers.get("User-Agent", "")
+            if CLASH_UA_RE.search(ua):
+                fname, ctype = "sub-clash.yaml", "text/yaml; charset=utf-8"
+            elif SINGBOX_UA_RE.search(ua):
+                fname, ctype = "sub-singbox.json", "application/json; charset=utf-8"
+            else:
+                fname, ctype = "sub-universal.txt", "text/plain; charset=utf-8"
+            self._serve_file(fname, ctype)
+            return
+
         self.path = parsed.path
         super().do_GET()
+
+    def _serve_file(self, fname, ctype):
+        fpath = os.path.join(DIRECTORY, fname)
+        try:
+            with open(fpath, "rb") as f:
+                body = f.read()
+        except OSError:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not generated yet, run: sb sub -> 1")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def list_directory(self, path):
         self.send_error(403, "Directory listing disabled")
