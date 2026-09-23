@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# sing-box-vps :: 小李的singbox VPS ai双栈智能管理脚本0.0.2
+# sing-box-vps :: 小李的singbox VPS ai双栈智能管理脚本0.0.1
 # Repository : https://github.com/lisiyong0707/singbox
 #
 # 功能总览:
@@ -75,26 +75,11 @@ _log_raw() {
 info() { printf "${BLUE}[i]${NC} %s\n" "$*"; _log_raw "[INFO] $*"; }
 ok()   { printf "${GREEN}[+]${NC} %s\n" "$*"; _log_raw "[OK] $*"; }
 warn() { printf "${YELLOW}[!]${NC} %s\n" "$*" >&2; _log_raw "[WARN] $*"; }
-# die() 有时在命令替换子 shell 中被调用 (例如 D_MODE=$(ask_node_network_mode)
-# 内部触发 die), 这时 exit 1 只终止子 shell, 主脚本靠 set -e 对赋值语句失败的
-# 传导最终也会退出并走 ERR trap, 但这样会导致 die() 的具体错误信息和 on_error()
-# 的通用报错各打印一次。用一个落盘的标记文件 (而非变量, 因为子 shell 里改的变量
-# 传不回父 shell) 告诉 on_error(): 已经有更具体的错误信息打印过了, 不用再重复。
-DIE_MARKER="${STATE_DIR}/.die_reported"
-die()  {
-  printf "${RED}[x]${NC} %s\n" "$*" >&2
-  _log_raw "[FATAL] $*"
-  : > "$DIE_MARKER" 2>/dev/null || true
-  exit 1
-}
+die()  { printf "${RED}[x]${NC} %s\n" "$*" >&2; _log_raw "[FATAL] $*"; exit 1; }
 title(){ printf "\n${BOLD}${CYAN}== %s ==${NC}\n" "$*"; }
 
 on_error() {
   local exit_code=$? line=$1
-  if [[ -f $DIE_MARKER ]]; then
-    rm -f "$DIE_MARKER" 2>/dev/null || true
-    exit "$exit_code"
-  fi
   printf "${RED}[x]${NC} 运行失败: 第 %s 行退出 (状态码 %s)。日志: %s\n" "$line" "$exit_code" "$LOG_FILE" >&2
   _log_raw "[FATAL] line=${line} exit=${exit_code} cmd_context=${BASH_COMMAND:-unknown}"
   exit "$exit_code"
@@ -302,22 +287,15 @@ check_ipv6_egress() {
 }
 
 # 返回: v4only | v6only | dual | none
-# 同时把结果写进 NET_V4_OK / NET_V6_OK / STACK_RESULT 三个全局变量。注意: 如果
-# 调用方用 `x=$(detect_network_stack)` 这种命令替换方式取值, 命令替换会在子
-# shell 里执行, 对全局变量的修改不会带回父 shell, 只有 stdout 打印的字符串能
-# 传回来。真正想复用 NET_V4_OK/NET_V6_OK 缓存值的调用方 (如 show_status) 必须
-# 直接调用本函数 (不经过 $()), 再读全局变量。
-declare -g NET_V4_OK=0 NET_V6_OK=0 STACK_RESULT=""
 detect_network_stack() {
-  NET_V4_OK=0; NET_V6_OK=0
-  check_ipv4_egress && NET_V4_OK=1
-  check_ipv6_egress && NET_V6_OK=1
-  if (( NET_V4_OK == 1 && NET_V6_OK == 1 )); then STACK_RESULT='dual'
-  elif (( NET_V4_OK == 1 )); then STACK_RESULT='v4only'
-  elif (( NET_V6_OK == 1 )); then STACK_RESULT='v6only'
-  else STACK_RESULT='none'
+  local v4=0 v6=0
+  check_ipv4_egress && v4=1
+  check_ipv6_egress && v6=1
+  if (( v4 == 1 && v6 == 1 )); then printf 'dual'
+  elif (( v4 == 1 )); then printf 'v4only'
+  elif (( v6 == 1 )); then printf 'v6only'
+  else printf 'none'
   fi
-  printf '%s' "$STACK_RESULT"
 }
 
 detect_public_ip() {
@@ -384,14 +362,63 @@ ensure_dns_resolver() {
   ' --arg tag "$SB_DNS_RESOLVER_TAG" || true
 }
 
+# create_base_config() 只在 config.json 完全不存在时才会写入 route.default_domain_resolver,
+# 对于早于该字段被引入之前就已生成的旧配置文件 (或手动编辑过的配置) 不会自动补上,
+# 导致 sing-box 1.12+ 在校验时报 "missing route.default_domain_resolver ... deprecated" 并 FATAL。
+# 这里单独做一次幂等自愈: 已存在则跳过, 缺失则补上, 不影响其余 route 字段。
+ensure_route_default_resolver() {
+  if jq -e --arg tag "$SB_DNS_RESOLVER_TAG" \
+      '.route.default_domain_resolver == $tag' "$CONFIG_FILE" >/dev/null 2>&1; then
+    return 0
+  fi
+  atomic_json_update "$CONFIG_FILE" '
+    .route = ((.route // {}) | .rules = (.rules // []) | .final = (.final // "direct")
+              | .default_domain_resolver = $tag)
+  ' --arg tag "$SB_DNS_RESOLVER_TAG" || true
+}
+
+# 同理: direct / direct-v4 / direct-v6 / direct-dual 四个基础出站也可能在老配置里缺失
+# (例如从更早版本的脚本升级过来), mode_outbound_tag() 生成的 inbound 路由规则会引用
+# 这些 tag, 缺失时 sing-box check 会直接报 "outbound not found"。这里按 tag 逐个补齐,
+# 已存在的 tag 不会被覆盖或重复添加。
+ensure_direct_outbounds() {
+  local candidate
+  if jq -e --arg tag "$SB_DNS_RESOLVER_TAG" '
+      (.outbounds // []) as $o |
+      ($o | any(.tag=="direct")) and
+      ($o | any(.tag=="direct-v4" and .domain_resolver.server==$tag)) and
+      ($o | any(.tag=="direct-v6" and .domain_resolver.server==$tag)) and
+      ($o | any(.tag=="direct-dual" and .domain_resolver.server==$tag))
+    ' "$CONFIG_FILE" >/dev/null 2>&1; then
+    return 0
+  fi
+  candidate=$(mktemp)
+  jq --arg tag "$SB_DNS_RESOLVER_TAG" '
+    .outbounds = (.outbounds // []) |
+    (if (.outbounds | any(.tag=="direct")) then . else .outbounds += [{type:"direct", tag:"direct"}] end) |
+    (if (.outbounds | any(.tag=="direct-v4")) then . else
+      .outbounds += [{type:"direct", tag:"direct-v4", domain_resolver:{server:$tag, strategy:"ipv4_only"}}] end) |
+    (if (.outbounds | any(.tag=="direct-v6")) then . else
+      .outbounds += [{type:"direct", tag:"direct-v6", domain_resolver:{server:$tag, strategy:"ipv6_only"}}] end) |
+    (if (.outbounds | any(.tag=="direct-dual")) then . else
+      .outbounds += [{type:"direct", tag:"direct-dual", domain_resolver:{server:$tag, strategy:"prefer_ipv6"}}] end)
+  ' "$CONFIG_FILE" > "$candidate"
+  if json_validate "$candidate"; then
+    atomic_install "$candidate" "$CONFIG_FILE" 600
+  else
+    warn "自动补齐基础出站失败, 请运行 'sb diag' 或检查 ${CONFIG_FILE} 是否损坏。"
+  fi
+  rm -f "$candidate"
+}
+
 ask_node_network_mode() {
   local stack choice
   stack=$(detect_network_stack)
   printf "\n当前服务器网络栈: %s\n" "$stack" >&2
   printf "选择节点接入与出站网络模式:\n" >&2
-  printf "  1) Dual 双栈节点 (监听 ::, 出站不强制偏好, 由 DNS 解析结果决定 IPv4/IPv6 顺序)\n" >&2
+  printf "  1) Dual 双栈节点 (监听 ::, 出站优先 IPv6 并自动回退 IPv4)\n" >&2
   printf "  2) IPv4 专用节点 (监听 0.0.0.0, 出站强制仅使用 IPv4)\n" >&2
-  printf "  3) IPv6 优先节点 (监听 ::, 出站优先 IPv6, 无法解析到 IPv6 时回退 IPv4)\n" >&2
+  printf "  3) IPv6 严格节点 (监听 ::, 出站强制仅使用 IPv6, 不回退 IPv4)\n" >&2
   read -r -p "请选择 [1]: " choice
   choice=${choice:-1}
   case "$choice" in
@@ -426,11 +453,7 @@ ask_node_server() {
       [[ -z $default ]] && default=$(detect_public_ipv6)
       read -r -p "客户端连接双栈地址 (强烈推荐填写已解析 A 和 AAAA 的域名) [${default}]: " val
       val=${val:-$default}
-      # dual 分支之前只判断非空, 没有走 v4/v6 分支那样的格式校验, 用户输入
-      # 带空格/非法字符的畸形值会被直接拼进连接串 URI; 这里补齐同等强度的校验,
-      # dual 模式允许 IPv4 / IPv6 / 域名三者之一。
-      valid_ipv4 "$val" || valid_ipv6 "$val" || valid_hostname "$val" \
-        || die "必须填写有效的 IPv4/IPv6 地址或域名。"
+      [[ -n $val ]] || die "必须填写有效的连接域名或 IP。"
       ;;
   esac
   printf '%s' "$val"
@@ -554,9 +577,9 @@ create_base_config() {
       { type: "direct", tag: "direct-v4",
         domain_resolver: { server: "dns-direct", strategy: "ipv4_only" } },
       { type: "direct", tag: "direct-v6",
-        domain_resolver: { server: "dns-direct", strategy: "prefer_ipv6" } },
+        domain_resolver: { server: "dns-direct", strategy: "ipv6_only" } },
       { type: "direct", tag: "direct-dual",
-        domain_resolver: { server: "dns-direct" } }
+        domain_resolver: { server: "dns-direct", strategy: "prefer_ipv6" } }
     ],
     route: { rules: [], final: "direct", default_domain_resolver: "dns-direct" }
   }' > "$candidate"
@@ -569,6 +592,8 @@ ensure_base_routing() {
   ensure_dirs
   create_base_config
   ensure_dns_resolver
+  ensure_route_default_resolver
+  ensure_direct_outbounds
 }
 # ---------------------------------------------------------------------------
 # 配置备份
@@ -642,13 +667,7 @@ check_and_handle_existing_tag() {
   if jq -e --arg tag "$tag" '.inbounds[]? | select(.tag == $tag)' "$CONFIG_FILE" >/dev/null 2>&1; then
     warn "检测到节点标识 [${tag}] 已存在!"
     if confirm "该节点已存在, 是否覆盖?" N; then
-      local candidate old_ports p
-      # 修正: 覆盖旧节点时原来没有显式撤销旧端口的防火墙放行规则; 目前 tag 里
-      # 带端口号所以新旧端口大多数情况下相同 (重开是幂等的), 但用户覆盖时也
-      # 可能改用别的端口, 这时旧端口的放行规则会一直残留。这里先取出旧端口,
-      # 删除入站配置后显式撤销放行 (tcp/udp 都尝试, close_firewall_port 内部
-      # 找不到对应规则时是安全的 no-op)。
-      old_ports=$(jq -r --arg tag "$tag" '.inbounds[]? | select(.tag == $tag) | .listen_port // empty' "$CONFIG_FILE")
+      local candidate
       candidate=$(mktemp)
       jq --arg tag "$tag" '
         ([.inbounds[]? | select(.tag == $tag) | .detour // empty]) as $detours |
@@ -658,10 +677,6 @@ check_and_handle_existing_tag() {
       apply_candidate "$candidate"
       rm -f "$candidate"
       atomic_json_update "$STATE_FILE" '.connections |= map(select(.tag != $tag))' --arg tag "$tag"
-      for p in $old_ports; do
-        close_firewall_port "$p" tcp
-        close_firewall_port "$p" udp
-      done
       ok "已自动清理旧节点 [${tag}] 及其关联入站, 开始重新写入..."
       return 0
     fi
@@ -703,6 +718,25 @@ persist_iptables_rules() {
   fi
 }
 
+readonly NFT_TABLE="sing_box_vps"
+
+ensure_nft_table() {
+  command -v nft >/dev/null 2>&1 || return 1
+  nft list table inet "$NFT_TABLE" >/dev/null 2>&1 && return 0
+  nft add table inet "$NFT_TABLE" 2>/dev/null || return 1
+  nft add chain inet "$NFT_TABLE" input '{ type filter hook input priority 0; policy accept; }' 2>/dev/null || return 1
+  return 0
+}
+
+persist_nft_rules() {
+  command -v nft >/dev/null 2>&1 || return 0
+  if [[ -d /etc/nftables.d ]]; then
+    nft list table inet "$NFT_TABLE" > "/etc/nftables.d/${NFT_TABLE}.nft" 2>/dev/null || true
+  elif [[ -f /etc/nftables.conf ]]; then
+    info "检测到 nftables, 规则已生效但未持久化; 如需重启后仍生效, 请自行将 'nft list table inet ${NFT_TABLE}' 的输出加入 /etc/nftables.conf。"
+  fi
+}
+
 open_firewall_port() {
   local port=$1 protocol=${2:-tcp} handled=0
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
@@ -728,31 +762,23 @@ open_firewall_port() {
       || ip6tables -I INPUT -p "$protocol" --dport "$port" -j ACCEPT
     handled=1
   fi
-  # 纯 nftables 系统 (没装 iptables-nft 兼容层, `command -v iptables` 探测不到)
-  # 之前会直接跳到最后的 warn, 只打印一行提示就完事, 端口实际上并没有放行,
-  # 容易出现"部署成功但外部连不通"。这里用独立的 inet 表 sbvps 加一条
-  # input hook 链兜底放行, 尽量不去碰用户已有的表结构。
-  local via_nft=0
-  if (( handled == 0 )) && command -v nft >/dev/null 2>&1; then
-    nft add table inet sbvps 2>/dev/null || true
-    nft 'add chain inet sbvps input { type filter hook input priority 0 ; policy accept ; }' 2>/dev/null || true
-    if nft add rule inet sbvps input "$protocol" dport "$port" accept 2>/dev/null; then
-      handled=1
-      via_nft=1
-    fi
-  fi
-  if (( via_nft == 1 )); then
-    ok "已通过 nftables (独立 inet sbvps 表) 放行 ${port}/${protocol}"
-  elif (( handled == 1 )); then
+  if (( handled == 1 )); then
     persist_iptables_rules
     ok "已在 iptables/ip6tables 放行 ${port}/${protocol} (若使用云厂商安全组, 仍需在控制台分别放行 IPv4 与 IPv6 规则)。"
-  else
-    warn "未检测到 UFW/firewalld/iptables/nftables 中任何一种可用的防火墙管理工具; 请在云厂商安全组放行 ${port}/${protocol} (注意 IPv4 与 IPv6 需分别放行)。"
+    return 0
   fi
+  # 纯 nftables 系统 (无 iptables-nft 兼容层, command -v iptables 探测不到) 的兜底路径
+  if command -v nft >/dev/null 2>&1 && ensure_nft_table; then
+    nft add rule inet "$NFT_TABLE" input "${protocol}" dport "${port}" accept 2>/dev/null
+    persist_nft_rules
+    ok "已通过 nftables 放行 ${port}/${protocol} (若使用云厂商安全组, 仍需在控制台分别放行 IPv4 与 IPv6 规则)。"
+    return 0
+  fi
+  warn "未检测到 UFW/firewalld/iptables/nftables 中任何一种可用的防火墙管理工具; 请在云厂商安全组放行 ${port}/${protocol} (注意 IPv4 与 IPv6 需分别放行)。"
 }
 
 close_firewall_port() {
-  # 节点删除时对称撤销放行规则: UFW/firewalld/iptables 三种情况都要处理,
+  # 节点删除时对称撤销放行规则: UFW/firewalld/iptables/nftables 四种情况都要处理,
   # 否则删除节点后端口仍然对外开放。
   local port=$1 protocol=${2:-tcp}
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
@@ -772,17 +798,14 @@ close_firewall_port() {
       ip6tables -D INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null || break
     done
   fi
-  if command -v nft >/dev/null 2>&1 && nft list table inet sbvps >/dev/null 2>&1; then
+  if command -v nft >/dev/null 2>&1 && nft list table inet "$NFT_TABLE" >/dev/null 2>&1; then
     local handle
-    handle=$(nft -a list chain inet sbvps input 2>/dev/null \
-      | awk -v proto="$protocol" -v p="$port" \
-        '$0 ~ (proto" dport "p" accept") { for (i=1;i<=NF;i++) if ($i=="handle") print $(i+1) }')
-    if [[ -n $handle ]]; then
-      local h
-      for h in $handle; do
-        nft delete rule inet sbvps input handle "$h" 2>/dev/null || true
-      done
-    fi
+    while handle=$(nft -a list chain inet "$NFT_TABLE" input 2>/dev/null \
+        | awk -v p="$port" -v pr="$protocol" '$0 ~ pr" dport "p" accept" {print $NF; exit}'); do
+      [[ -n $handle ]] || break
+      nft delete rule inet "$NFT_TABLE" input handle "$handle" 2>/dev/null || break
+    done
+    persist_nft_rules
   fi
   persist_iptables_rules
 }
@@ -1015,6 +1038,8 @@ print_result_block() {
   printf '\n%s 客户端连接串:\n%s\n' "$title" "$uri"
   show_qrcode "$uri" "$tag"
   printf '\n'
+  info "正在自动刷新订阅文件..."
+  sub_build_all || warn "订阅文件自动刷新失败, 可稍后运行 'sb sub' 手动刷新。"
 }
 
 # ---------------------------------------------------------------------------
@@ -1470,8 +1495,9 @@ EOF
   rm -f "$candidate"
 
   atomic_json_update "$CF_TUNNEL_STATE" \
-    '.tunnels += [{name:$name, domain:$domain, port:($port|tonumber), tag:$tag, created_at:(now|strftime("%Y-%m-%dT%H:%M:%SZ"))}]' \
-    --arg name "$tunnel_name" --arg domain "$domain" --arg port "$port" --arg tag "$tag" || true
+    '.tunnels += [{name:$name, domain:$domain, port:($port|tonumber), tag:$tag, created_at:(now|strftime("%Y-%m-%dT%H:%M:%SZ")), install_method:$method}]' \
+    --arg name "$tunnel_name" --arg domain "$domain" --arg port "$port" --arg tag "$tag" \
+    --arg method "$(_cloudflared_install_method)" || true
 
   path_encoded=$(jq -nr --arg path "$path" '$path | @uri')
   local node_name; node_name=$(ask_node_name "CF-Tunnel")
@@ -1519,29 +1545,31 @@ cf_tunnel_stop() {
 
 cf_tunnel_uninstall() {
   confirm "确认卸载 cloudflared 并移除其配置" N || return 0
+  local method
+  method=$(_cloudflared_install_method)
+
+  # 停止并移除 token 模式下由 'cloudflared service install' 生成的系统服务
+  # (与本脚本自建的 /etc/systemd/system/cloudflared.service 二选一存在, 两者都尝试清理)
   systemctl disable --now cloudflared 2>/dev/null || true
-  # 修正: install_cloudflared() 优先走"直接下载二进制到 /usr/local/bin", 只有
-  # 下载失败才回退到 APT 源; 原卸载逻辑只有一句 `apt-get remove cloudflared`,
-  # 如果当初是二进制方式装的, 这行什么也清不掉。这里按实际安装方式分别处理:
-  # 1) token 模式下 `cloudflared service install` 会自己注册一个 systemd 服务,
-  #    用它自带的 uninstall 子命令反向清理最可靠;
-  # 2) APT 安装的话卸载 apt 包;
-  # 3) 二进制直装的话删除 /usr/local/bin/cloudflared。
-  # 三步互不冲突, 依次尝试即可, 不需要先判断当初走的是哪条路径。
-  if command -v cloudflared >/dev/null 2>&1; then
-    cloudflared service uninstall >/dev/null 2>&1 || true
-  fi
-  if dpkg -s cloudflared >/dev/null 2>&1; then
-    apt-get remove -y -qq cloudflared 2>/dev/null || true
-  fi
-  rm -f /usr/local/bin/cloudflared
-  rm -rf "$CF_CONFIG_DIR"
+  command -v cloudflared >/dev/null 2>&1 && cloudflared service uninstall 2>/dev/null || true
   rm -f /etc/systemd/system/cloudflared.service
-  systemctl daemon-reload
-  if confirm "是否同时删除 cloudflared 登录凭证目录 (~/.cloudflared, /root/.cloudflared)" N; then
-    rm -rf /root/.cloudflared "${HOME}/.cloudflared" 2>/dev/null || true
-  fi
-  ok "cloudflared 已卸载, 相关配置已清理。"
+  systemctl daemon-reload 2>/dev/null || true
+
+  case "$method" in
+    apt)
+      apt-get remove -y -qq cloudflared 2>/dev/null || true
+      rm -f /etc/apt/sources.list.d/cloudflared.list /usr/share/keyrings/cloudflare-public-v2.gpg
+      ;;
+    binary)
+      rm -f /usr/local/bin/cloudflared
+      ;;
+  esac
+
+  rm -rf "$CF_CONFIG_DIR"
+  rm -f /root/.cloudflared/cert.pem "${HOME}/.cloudflared/cert.pem" 2>/dev/null || true
+  rm -rf /root/.cloudflared "${HOME}/.cloudflared" 2>/dev/null || true
+  rm -f "$CF_TUNNEL_STATE"
+  ok "cloudflared 已卸载 (安装方式: ${method}), 相关配置/凭证/systemd 单元已清理。"
 }
 
 cf_tunnel_rebind_token() {
@@ -1588,6 +1616,15 @@ cf_tunnel_menu() {
 # 实现方式: 官方 cloudflare-warp 客户端 (warp-cli), 以 proxy 模式在本机
 # 127.0.0.1:40000 暴露 SOCKS5, 再作为 sing-box 的 socks 出站接入路由,
 # 避免直接接管整机路由表, 对宿主机其余服务零侵入。
+#
+# 重要限制 (如实说明, 不提供做不到的选项):
+#   warp-cli 官方客户端本身不提供"仅用 IPv4 出口"或"仅用 IPv6 出口"这种
+#   按协议族强制锁定的开关 (WARP 隧道内部是单一 WireGuard 会话, 出口地址
+#   由 Cloudflare 边缘分配, 客户端侧无法指定协议族)。因此这里不再提供
+#   "双栈 / IPv4 / IPv6" 这种实际上什么都不做的假选择, 只保留一个真实存在
+#   的可调项: 是否偏好用 IPv6 建立到 Cloudflare 边缘的隧道连接本身
+#   (tunnel protocol / 连接方式), 这与"出口协议族"是两回事, 已在菜单文案
+#   中明确区分。
 # ===========================================================================
 readonly WARP_SOCKS_PORT=40000
 readonly WARP_OUTBOUND_TAG="warp-out"
@@ -1614,66 +1651,19 @@ warp_ensure_registered() {
   fi
 }
 
-warp_set_mode() {
-  # mode: v4 | v6 | dual
-  # 修正: 原实现试图靠 `warp-cli tunnel protocol set wireguard` 区分 v4/v6/dual,
-  # 但这个命令只是切换隧道底层协议 (WireGuard vs MASQUE), 跟"是否只用 IPv4/IPv6
-  # 出站"毫无关系, 而且 warp-cli 本身并不提供强制 IPv4-only / IPv6-only 出站的
-  # 开关, 导致三个菜单选项实际上跑出来的行为完全一样。
-  #
-  # 真正能生效的做法: WARP 通过本机 SOCKS5 接入 sing-box 出站 (warp-out), 对于
-  # SOCKS 出站, sing-box 会依据其 domain_resolver 配置在本地解析目标域名后再把
-  # 解析到的 IP 交给 SOCKS 代理, 而不是把域名透传给代理去解析。也就是说目标域名
-  # 解析成 IPv4 还是 IPv6, 直接决定了流量最终经由 WARP 隧道走 IPv4 还是 IPv6 出口。
-  # 因此这里改为和 direct-v4/v6/dual 出站一致的 domain_resolver.strategy 方案,
-  # 而不是摆弄 warp-cli 内部协议开关。
-  local mode=$1 strategy
-  case "$mode" in
-    v4)   strategy="ipv4_only" ;;
-    v6)   strategy="prefer_ipv6" ;;
-    *)    strategy="" ;;  # dual: 不强制偏好, 交由 DNS 解析结果决定
-  esac
-
+warp_connect() {
+  # WARP 本身只有"是否连接"的开关, 没有按协议族区分的模式,
+  # 这里固定用 proxy 模式在本机暴露 SOCKS5, 不再提供虚假的 v4/v6/dual 选择
   warp-cli --accept-tos mode proxy >/dev/null 2>&1 || true
   warp-cli --accept-tos proxy port "$WARP_SOCKS_PORT" >/dev/null 2>&1 || true
   warp-cli --accept-tos connect >/dev/null 2>&1 || true
-
-  # 更新 sing-box 里 warp-out 出站的 domain_resolver, 若该出站尚未创建 (首次
-  # install_warp 调用时) 则先跳过, 由 install_warp 创建完出站后再补一次。
-  if [[ -f $CONFIG_FILE ]] && jq -e --arg tag "$WARP_OUTBOUND_TAG" \
-      '.outbounds[]? | select(.tag == $tag)' "$CONFIG_FILE" >/dev/null 2>&1; then
-    ensure_dns_resolver
-    if [[ -n $strategy ]]; then
-      atomic_json_update "$CONFIG_FILE" \
-        '(.outbounds[] | select(.tag == $tag) | .domain_resolver) = {server:$server, strategy:$strategy}' \
-        --arg tag "$WARP_OUTBOUND_TAG" --arg server "$SB_DNS_RESOLVER_TAG" --arg strategy "$strategy" || true
-    else
-      atomic_json_update "$CONFIG_FILE" \
-        '(.outbounds[] | select(.tag == $tag) | .domain_resolver) = {server:$server}' \
-        --arg tag "$WARP_OUTBOUND_TAG" --arg server "$SB_DNS_RESOLVER_TAG" || true
-    fi
-    systemctl restart sing-box 2>/dev/null || true
-  fi
 }
 
 install_warp() {
   ensure_installed
   command -v warp-cli >/dev/null 2>&1 || install_warp_client
   warp_ensure_registered
-
-  local mode
-  printf "\n选择 WARP 出站模式:\n" >&2
-  printf "  1) 双栈 WARP (IPv4 + IPv6)\n" >&2
-  printf "  2) IPv4 WARP\n" >&2
-  printf "  3) IPv6 WARP\n" >&2
-  read -r -p "请选择 [1]: " mode
-  mode=${mode:-1}
-  case $mode in
-    2) mode=v4 ;;
-    3) mode=v6 ;;
-    *) mode=dual ;;
-  esac
-  warp_set_mode "$mode"
+  warp_connect
   sleep 2
 
   if ! warp-cli --accept-tos status 2>/dev/null | grep -qi "Connected"; then
@@ -1682,20 +1672,17 @@ install_warp() {
 
   local candidate
   candidate=$(mktemp)
-  jq --arg tag "$WARP_OUTBOUND_TAG" --argjson port "$WARP_SOCKS_PORT" --arg server "$SB_DNS_RESOLVER_TAG" '
+  jq --arg tag "$WARP_OUTBOUND_TAG" --argjson port "$WARP_SOCKS_PORT" '
     if (.outbounds | map(select(.tag == $tag)) | length) == 0 then
-      .outbounds += [{type:"socks", tag:$tag, server:"127.0.0.1", server_port:$port, version:"5",
-                       domain_resolver:{server:$server}}]
+      .outbounds += [{type:"socks", tag:$tag, server:"127.0.0.1", server_port:$port, version:"5"}]
     else . end
   ' "$CONFIG_FILE" > "$candidate"
   apply_candidate "$candidate"
   rm -f "$candidate"
-  # warp-out 出站此时才刚创建, 上面那次 warp_set_mode 调用还找不到它, domain_resolver
-  # 策略没能写入; 这里在出站创建完之后按选择的模式再补一次, 确保生效。
-  warp_set_mode "$mode"
 
   ok "WARP 已安装并以 SOCKS5 (127.0.0.1:${WARP_SOCKS_PORT}) 接入 sing-box 出站 [${WARP_OUTBOUND_TAG}]。"
   info "可在部署节点或编辑路由规则时, 将出站指向 '${WARP_OUTBOUND_TAG}' 以让该节点流量经由 WARP。"
+  info "提示: WARP 官方客户端不支持按 IPv4/IPv6 协议族强制锁定出口, 因此本脚本不提供该选项。"
 }
 
 warp_status() {
@@ -1706,19 +1693,6 @@ warp_status() {
   warp-cli --accept-tos status || true
   printf '\nsing-box 内 WARP 出站配置:\n'
   jq -r --arg tag "$WARP_OUTBOUND_TAG" '.outbounds[]? | select(.tag==$tag)' "$CONFIG_FILE" 2>/dev/null || true
-}
-
-warp_switch_mode() {
-  command -v warp-cli >/dev/null 2>&1 || die "请先安装 WARP。"
-  local mode
-  printf "\n选择新的 WARP 模式:\n1) 双栈  2) IPv4  3) IPv6\n"
-  read -r -p "请选择 [1]: " mode
-  case ${mode:-1} in
-    2) warp_set_mode v4 ;;
-    3) warp_set_mode v6 ;;
-    *) warp_set_mode dual ;;
-  esac
-  ok "WARP 模式已切换。"
 }
 
 uninstall_warp() {
@@ -1832,17 +1806,15 @@ warp_menu() {
   local choice
   while true; do
     title "Cloudflare WARP 管理"
-    printf '  1) 安装 WARP\n'
+    printf '  1) 安装并连接 WARP\n'
     printf '  2) 查看状态\n'
-    printf '  3) 切换模式 (IPv4/IPv6/双栈)\n'
-    printf '  4) 卸载 WARP\n'
+    printf '  3) 卸载 WARP\n'
     printf '  0) 返回主菜单\n'
     read -r -p '请选择: ' choice
     case $choice in
       1) install_warp ;;
       2) warp_status ;;
-      3) warp_switch_mode ;;
-      4) uninstall_warp ;;
+      3) uninstall_warp ;;
       0) return 0 ;;
       *) warn "无效的编号选择。" ;;
     esac
@@ -1865,25 +1837,32 @@ _speedtest_one() {
     printf '延迟: 测量失败\n'
   fi
 
-  # 修正: 原来的 `curl ... || echo 0` 里 || 是在子 shell 里连接 curl 和 echo 0,
-  # 只要 curl 因 --max-time 超时以非 0 退出, 就会整个丢弃已经跑出来的部分平均
-  # 速度, 直接归零, 在低速线路上会把"慢"误报成"测速失败/断线"。这里改为:
-  # 不管 curl 是否超时退出, 都先看它有没有输出可用的 speed_download 数值,
-  # 只有确实什么都没量到时才归零; 同时把超时从 10s 放宽到 20s, 减少低速线路
-  # 被过早掐断的概率。
+  # 下载测速: 100MB 在 10s 超时下要求 >=80Mbps 才能跑完整段, 低速线路会被
+  # --max-time 中途掐断 (curl 退出码非0), 此时不能简单地把结果记为 0——
+  # curl 在超时退出前仍会通过 -w 输出已完成部分的瞬时速率, 这里改为放宽
+  # 超时时间, 并且只要 -w 输出了合法数字就采用该值 (即便传输被中途终止),
+  # 只有连输出都没拿到时才归零, 避免慢速线路被误判为"下载速度为0"。
   dl_bps=$(curl -o /dev/null -s --max-time 20 -w '%{speed_download}' "$dl_url" 2>/dev/null)
-  [[ $dl_bps =~ ^[0-9]+(\.[0-9]+)?$ ]] || dl_bps=0
+  [[ $dl_bps =~ ^[0-9]+([.][0-9]+)?$ ]] || dl_bps=0
   dl_mbps=$(awk -v b="$dl_bps" 'BEGIN{printf "%.2f", (b*8)/1000000}')
-  printf '下载速度: %s Mbps\n' "$dl_mbps"
+  if (( $(awk -v b="$dl_bps" 'BEGIN{print (b==0)}') )); then
+    printf '下载速度: 测量失败或线路过慢 (20s 内未获得有效速率样本)\n'
+  else
+    printf '下载速度: %s Mbps\n' "$dl_mbps"
+  fi
 
   if [[ -n $ul_url ]]; then
     local tmpfile
     tmpfile=$(mktemp)
     dd if=/dev/urandom of="$tmpfile" bs=1M count=8 >/dev/null 2>&1
     ul_bps=$(curl -o /dev/null -s --max-time 20 -w '%{speed_upload}' -X POST --data-binary "@${tmpfile}" "$ul_url" 2>/dev/null)
-    [[ $ul_bps =~ ^[0-9]+(\.[0-9]+)?$ ]] || ul_bps=0
+    [[ $ul_bps =~ ^[0-9]+([.][0-9]+)?$ ]] || ul_bps=0
     ul_mbps=$(awk -v b="$ul_bps" 'BEGIN{printf "%.2f", (b*8)/1000000}')
-    printf '上传速度: %s Mbps\n' "$ul_mbps"
+    if (( $(awk -v b="$ul_bps" 'BEGIN{print (b==0)}') )); then
+      printf '上传速度: 测量失败或线路过慢 (20s 内未获得有效速率样本)\n'
+    else
+      printf '上传速度: %s Mbps\n' "$ul_mbps"
+    fi
     rm -f "$tmpfile"
   fi
 }
@@ -1962,12 +1941,19 @@ diag_check_firewall() {
   if command -v firewall-cmd >/dev/null 2>&1; then
     printf '  firewalld: %s\n' "$(systemctl is-active firewalld 2>/dev/null || echo 未运行)"
   fi
+  if command -v nft >/dev/null 2>&1; then
+    if nft list table inet "$NFT_TABLE" >/dev/null 2>&1; then
+      printf '  nftables: 已启用本脚本管理的表 [%s]\n' "$NFT_TABLE"
+    else
+      printf '  nftables: 已安装, 本脚本尚未在其上创建规则\n'
+    fi
+  fi
 }
 
 diag_check_cloudflared() {
   printf '\n[Cloudflare Tunnel]\n'
   if command -v cloudflared >/dev/null 2>&1; then
-    printf '  已安装: %s\n' "$(cloudflared --version 2>/dev/null | head -1)"
+    printf '  已安装: %s (方式: %s)\n' "$(cloudflared --version 2>/dev/null | head -1)" "$(_cloudflared_install_method)"
     printf '  服务状态: %s\n' "$(systemctl is-active cloudflared 2>/dev/null || echo 未运行)"
   else
     printf '  未安装\n'
@@ -2543,8 +2529,8 @@ _inbound_protocols() {
   esac
 }
 
-# 探测某个端口/协议当前是否已经在防火墙层放行, 兼容 ufw/firewalld/iptables
-# 三种后端, 与 open_firewall_port() 判断"用哪个后端"的逻辑保持一致
+# 探测某个端口/协议当前是否已经在防火墙层放行, 兼容 ufw/firewalld/iptables/nftables
+# 四种后端, 与 open_firewall_port() 判断"用哪个后端"的逻辑保持一致
 _fw_port_allowed() {
   local port=$1 protocol=$2
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
@@ -2557,6 +2543,10 @@ _fw_port_allowed() {
   fi
   if command -v iptables >/dev/null 2>&1; then
     iptables -C INPUT -p "$protocol" --dport "$port" -j ACCEPT 2>/dev/null
+    return $?
+  fi
+  if command -v nft >/dev/null 2>&1 && nft list table inet "$NFT_TABLE" >/dev/null 2>&1; then
+    nft list chain inet "$NFT_TABLE" input 2>/dev/null | grep -qE "${protocol} dport ${port} accept"
     return $?
   fi
   return 1
@@ -2836,18 +2826,18 @@ validate_and_restart() {
 
 show_status() {
   ensure_installed
-  local v4_status="不可用" v6_status="不可用" public_ipv4 public_ipv6
-  # 直接调用 (不经过 $()), 这样 NET_V4_OK/NET_V6_OK/STACK_RESULT 才能写回当前
-  # shell; 用 $() 会在子 shell 里跑, 全局变量的修改出不来, 之前就是这样才导致
-  # 下面又重复跑了一遍 check_ipv4_egress/check_ipv6_egress。
-  detect_network_stack >/dev/null
-  (( NET_V4_OK == 1 )) && v4_status="可用"
-  (( NET_V6_OK == 1 )) && v6_status="可用"
+  local stack v4_status="不可用" v6_status="不可用" public_ipv4 public_ipv6
+  stack=$(detect_network_stack)
+  case "$stack" in
+    dual)   v4_status="可用"; v6_status="可用" ;;
+    v4only) v4_status="可用" ;;
+    v6only) v6_status="可用" ;;
+  esac
   public_ipv4=$(detect_public_ip || true)
   public_ipv6=$(detect_public_ipv6 || true)
   printf '\nsing-box 版本: '; sing-box version | head -n 1
   printf '出站 IP 版本策略: domain_resolver (dns tag: %s)\n' "$SB_DNS_RESOLVER_TAG"
-  printf '网络栈判定: %s\n' "$STACK_RESULT"
+  printf '网络栈判定: %s\n' "$stack"
   printf '外网栈连通性: IPv4 [%s] | IPv6 [%s]\n' "$v4_status" "$v6_status"
   printf '公网 IPv4: %s\n' "${public_ipv4:-未检测到}"
   printf '公网 IPv6: %s\n' "${public_ipv6:-未检测到}"
@@ -2963,7 +2953,7 @@ print_menu() {
   printf " ${GREEN}[VLESS Reality 专项节点]${NC}\n"
   printf '  1) 新建 VLESS Reality Dual (双栈智能推荐)\n'
   printf '  2) 新建 VLESS Reality IPv4 (出口强制 IPv4)\n'
-  printf '  3) 新建 VLESS Reality IPv6 (出口优先 IPv6 / 回退 IPv4)\n\n'
+  printf '  3) 新建 VLESS Reality IPv6 严格 (出口强制仅 IPv6, 不回退)\n\n'
   printf " ${YELLOW}[高隐蔽 / 抗封锁 / 穿透节点]${NC}\n"
   printf '  4) 新建 VLESS Reality gRPC (云原生特征 / 多路复用)\n'
   printf '  5) 新建 ShadowTLS v3 + SS2022\n'
