@@ -66,21 +66,23 @@ readonly REALITY_PRESET_DOMAINS=(
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; MAGENTA='\033[0;35m'; BOLD='\033[1m'; NC='\033[0m'
 
-# 计算字符串显示宽度 (中文全角按 2 算, 英文数字符号按 1 算), 用于菜单列对齐
+# 计算字符串显示宽度 (按 Unicode 东亚宽度标准: 全角/宽字符算 2, 其余算 1), 用于菜单列对齐
+# 比手工判断字符范围更准确, 能正确处理中英文混排的情况
 _pad_display() {
-  local s=$1 target=$2 i ch width=0
-  local len=${#s}
-  for (( i=0; i<len; i++ )); do
-    ch=${s:i:1}
-    if [[ $ch > $'\u1100' ]]; then
-      width=$((width+2))
-    else
-      width=$((width+1))
-    fi
-  done
-  local pad=$((target-width))
-  (( pad < 1 )) && pad=1
-  printf '%s%*s' "$s" "$pad" ''
+  local s=$1 target=$2
+  python3 -c "
+import sys, unicodedata
+s = sys.argv[1]
+target = int(sys.argv[2])
+width = 0
+for ch in s:
+    ea = unicodedata.east_asian_width(ch)
+    width += 2 if ea in ('W', 'F') else 1
+pad = target - width
+if pad < 1:
+    pad = 1
+sys.stdout.write(s + ' ' * pad)
+" "$s" "$target"
 }
 
 _log_raw() {
