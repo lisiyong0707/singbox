@@ -2947,49 +2947,59 @@ print_menu() {
   local v4_tag="[无IPv4]" v6_tag="[无IPv6]"
   check_ipv4_egress && v4_tag="[IPv4正常]"
   check_ipv6_egress && v6_tag="[IPv6正常]"
-  printf '\n%s\n' '========================================================================'
-  printf ' singbox VPS 小李的双栈智能管理 v%s %s %s\n' "$SCRIPT_VERSION" "$v4_tag" "$v6_tag"
-  printf '%s\n' '=========================================================================='
-  printf " ${GREEN}[VLESS Reality 专项节点]${NC}\n"
-  printf '  1) 新建 VLESS Reality Dual (双栈智能推荐)\n'
-  printf '  2) 新建 VLESS Reality IPv4 (出口强制 IPv4)\n'
-  printf '  3) 新建 VLESS Reality IPv6 严格 (出口强制仅 IPv6, 不回退)\n\n'
-  printf " ${YELLOW}[高隐蔽 / 抗封锁 / 穿透节点]${NC}\n"
-  printf '  4) 新建 VLESS Reality gRPC (云原生特征 / 多路复用)\n'
-  printf '  5) 新建 ShadowTLS v3 + SS2022\n'
-  printf '  6) Cloudflare Tunnel 管理 (新建 / 状态 / 日志 / 重启 / 卸载)\n\n'
-  printf " ${BLUE}[经典协议入站]${NC}\n"
-  printf '  7) 新建 Shadowsocks 2022 入站\n'
-  printf '  8) 新建 Trojan + TLS 入站\n'
-  printf '  9) 新建 VLESS + TLS 入站\n'
-  printf ' 10) 新建 Hysteria2 + TLS 入站\n'
-  printf ' 11) 新建 TUIC v5 入站\n'
-  printf ' 12) 新建 AnyTLS + TLS 入站\n\n'
-  printf " ${CYAN}[订阅 / WARP / 测速]${NC}\n"
-  printf ' 13) 订阅系统管理\n'
-  printf ' 14) Cloudflare WARP 管理\n'
-  printf ' 15) 服务器测速\n\n'
-  printf " ${MAGENTA}[管理与运维]${NC}\n"
-  printf ' 16) 查看客户端连接串\n'
-  printf ' 17) 查看节点二维码\n'
-  printf ' 18) 删除入站节点 (联动清理分流路由)\n'
-  printf ' 19) 查看服务状态与网络栈情况\n'
-  printf ' 20) 查看实时运行日志\n'
-  printf ' 21) 校验配置并重启服务\n'
-  printf ' 22) 系统健康检查\n'
-  printf ' 23) 系统诊断 (端口/DNS/BBR/防火墙/Tunnel/配置)\n'
-  printf ' 24) 证书管理\n'
-  printf ' 25) 启用 BBR 拥塞控制\n'
-  printf ' 26) 恢复最近一次配置备份\n'
-  printf ' 27) 安装 / 修复官方 sing-box 环境\n'
-  printf ' 28) 更新 sing-box 核心\n'
-  printf ' 29) 从 GitHub 更新本脚本\n'
-  printf ' 30) 卸载 sing-box\n'
-  printf ' 31) 编辑节点 (改名 / 改端口 / 改地址 / 改域名)\n'
-  printf ' 32) 检查并修复孤儿节点 (reconcile)\n'
-  printf '  0) 退出\n\n'
-}
+  local cols
+  cols=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}
 
+  printf '\n%s\n' '════════════════════════════════════════════════════════════════════════════'
+  printf ' singbox VPS 小李的双栈智能管理 v%s  %s %s\n' "$SCRIPT_VERSION" "$v4_tag" "$v6_tag"
+  printf '%s\n' '════════════════════════════════════════════════════════════════════════════'
+
+  if (( cols >= 100 )); then
+    # 宽终端 (>=100列): 三列紧凑布局, 一屏显示完
+    printf " ${GREEN}[Reality 专项]${NC}\n"
+    printf '  1) Dual 双栈推荐        2) IPv4 强制            3) IPv6 严格(不回退)\n\n'
+    printf " ${YELLOW}[高隐蔽/抗封锁/穿透]${NC}\n"
+    printf '  4) Reality gRPC         5) ShadowTLS+SS2022     6) Cloudflare Tunnel 管理\n\n'
+    printf " ${BLUE}[经典协议入站]${NC}\n"
+    printf '  7) Shadowsocks 2022     9) VLESS + TLS         11) TUIC v5\n'
+    printf '  8) Trojan + TLS        10) Hysteria2 + TLS     12) AnyTLS + TLS\n\n'
+    printf " ${CYAN}[订阅/WARP/测速]${NC}\n"
+    printf ' 13) 订阅系统管理        14) Cloudflare WARP     15) 服务器测速\n\n'
+    printf " ${MAGENTA}[管理与运维]${NC}\n"
+    printf ' 16) 连接串   19) 服务状态  22) 健康检查  25) 启用BBR   28) 更新核心  31) 编辑节点\n'
+    printf ' 17) 二维码   20) 运行日志  23) 系统诊断  26) 恢复备份  29) 更新脚本  32) reconcile\n'
+    printf ' 18) 删除节点 21) 校验重启  24) 证书管理  27) 修复环境  30) 卸载\n'
+  else
+    # 窄终端 (<100列): 回退到原始单列, 避免自动换行把布局搞乱
+    printf " ${GREEN}[VLESS Reality 专项节点]${NC}\n"
+    printf '  1) 新建 VLESS Reality Dual (双栈智能推荐)\n'
+    printf '  2) 新建 VLESS Reality IPv4 (出口强制 IPv4)\n'
+    printf '  3) 新建 VLESS Reality IPv6 严格 (出口强制仅 IPv6, 不回退)\n\n'
+    printf " ${YELLOW}[高隐蔽 / 抗封锁 / 穿透节点]${NC}\n"
+    printf '  4) 新建 VLESS Reality gRPC (云原生特征 / 多路复用)\n'
+    printf '  5) 新建 ShadowTLS v3 + SS2022\n'
+    printf '  6) Cloudflare Tunnel 管理 (新建 / 状态 / 日志 / 重启 / 卸载)\n\n'
+    printf " ${BLUE}[经典协议入站]${NC}\n"
+    printf '  7) 新建 Shadowsocks 2022 入站\n'
+    printf '  8) 新建 Trojan + TLS 入站\n'
+    printf '  9) 新建 VLESS + TLS 入站\n'
+    printf ' 10) 新建 Hysteria2 + TLS 入站\n'
+    printf ' 11) 新建 TUIC v5 入站\n'
+    printf ' 12) 新建 AnyTLS + TLS 入站\n\n'
+    printf " ${CYAN}[订阅 / WARP / 测速]${NC}\n"
+    printf ' 13) 订阅系统管理\n'
+    printf ' 14) Cloudflare WARP 管理\n'
+    printf ' 15) 服务器测速\n\n'
+    printf " ${MAGENTA}[管理与运维]${NC}\n"
+    printf ' 16) 查看客户端连接串\n  17) 查看节点二维码\n  18) 删除入站节点 (联动清理分流路由)\n'
+    printf ' 19) 查看服务状态与网络栈情况\n  20) 查看实时运行日志\n  21) 校验配置并重启服务\n'
+    printf ' 22) 系统健康检查\n  23) 系统诊断 (端口/DNS/BBR/防火墙/Tunnel/配置)\n  24) 证书管理\n'
+    printf ' 25) 启用 BBR 拥塞控制\n  26) 恢复最近一次配置备份\n  27) 安装 / 修复官方 sing-box 环境\n'
+    printf ' 28) 更新 sing-box 核心\n  29) 从 GitHub 更新本脚本\n  30) 卸载 sing-box\n'
+    printf ' 31) 编辑节点 (改名 / 改端口 / 改地址 / 改域名)\n  32) 检查并修复孤儿节点 (reconcile)\n'
+  fi
+  printf '\n  0) 退出\n\n'
+}
 menu() {
   local choice
   while true; do
