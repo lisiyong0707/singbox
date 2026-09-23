@@ -3027,7 +3027,7 @@ print_menu() {
     )
     local col=0 item
     for item in "${ops_a[@]}"; do
-      _pad_display "$item" 34
+      _pad_display "$item" 36
       col=$((col+1))
       (( col % 3 == 0 )) && printf '\n'
     done
