@@ -115,8 +115,19 @@ title(){ printf "\n${BOLD}${CYAN}== %s ==${NC}\n" "$*"; }
 
 on_error() {
   local exit_code=$? line=$1
-  printf "${RED}[x]${NC} 运行失败: 第 %s 行退出 (状态码 %s)。日志: %s\n" "$line" "$exit_code" "$LOG_FILE" >&2
-  _log_raw "[FATAL] line=${line} exit=${exit_code} cmd_context=${BASH_COMMAND:-unknown}"
+  local func="${FUNCNAME[1]:-主流程}"
+  printf "${RED}[x]${NC} 运行失败: 函数 [%s] 第 %s 行退出 (状态码 %s)\n" "$func" "$line" "$exit_code" >&2
+  printf "${RED}[x]${NC} 出错命令: %s\n" "${BASH_COMMAND:-未知}" >&2
+  if (( ${#FUNCNAME[@]} > 2 )); then
+    local i trace=""
+    for ((i=1; i<${#FUNCNAME[@]}-1; i++)); do
+      trace+="${FUNCNAME[$i]}"
+      (( i < ${#FUNCNAME[@]}-2 )) && trace+=" <- "
+    done
+    printf "${RED}[x]${NC} 调用链: %s\n" "$trace" >&2
+  fi
+  printf "${RED}[x]${NC} 日志文件: %s\n" "$LOG_FILE" >&2
+  _log_raw "[FATAL] func=${func} line=${line} exit=${exit_code} cmd=${BASH_COMMAND:-unknown}"
   exit "$exit_code"
 }
 trap 'on_error $LINENO' ERR
