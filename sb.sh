@@ -215,7 +215,7 @@ ask_port() {
   while true; do
     read -r -p "$prompt [$default]: " value || true
     value=${value:-$default}
-    valid_port "$value" && { printf '%s' "$value"; return 0; }
+    valid_port "$value" && { printf '%s' "$((10#$value))"; return 0; }
     warn "端口必须是 1 到 65535 之间的整数。"
   done
 }
@@ -297,6 +297,33 @@ atomic_json_update() {
     return 1
   fi
   atomic_install "$candidate" "$target" 600
+  rm -f "$candidate" 2>/dev/null || true
+  return 0
+}
+# 与 atomic_json_update 类似, 但专供 CONFIG_FILE 的自愈/迁移函数使用:
+# 在 JSON 语法校验之外额外跑一次 sing-box check, 两者都通过才落地。
+# 避免"JSON 合法但 sing-box 不认"的配置被自愈逻辑悄悄写进生产文件,
+# 导致下一次真正部署节点时才报错、却让人误以为是新节点的问题。
+atomic_config_update_checked() {
+  local filter=$1; shift
+  local candidate
+  candidate=$(mktemp "${CONFIG_FILE}.XXXXXX")
+  if ! jq "$filter" "$@" "$CONFIG_FILE" > "$candidate" 2>>"$LOG_FILE"; then
+    rm -f "$candidate"
+    warn "jq 变更执行失败, 已保留原文件不变: ${CONFIG_FILE}"
+    return 1
+  fi
+  if ! json_validate "$candidate"; then
+    rm -f "$candidate"
+    warn "jq 变更结果 JSON 校验失败, 已回滚: ${CONFIG_FILE}"
+    return 1
+  fi
+  if ! sing-box check -c "$candidate" >>"$LOG_FILE" 2>&1; then
+    rm -f "$candidate"
+    warn "自动迁移生成的配置未通过 sing-box check 校验, 已保留原配置不变, 详见 ${LOG_FILE}。"
+    return 1
+  fi
+  atomic_install "$candidate" "$CONFIG_FILE" 600
   rm -f "$candidate" 2>/dev/null || true
   return 0
 }
@@ -413,7 +440,7 @@ ensure_dns_resolver() {
       '(.dns.servers // []) | any(.tag == $tag)' "$CONFIG_FILE" >/dev/null 2>&1; then
     return 0
   fi
-  atomic_json_update "$CONFIG_FILE" '
+  atomic_config_update_checked '
     .dns = ((.dns // {}) | .servers = ((.servers // []) + [{type:"udp", tag:$tag, server:"1.1.1.1"}]))
   ' --arg tag "$SB_DNS_RESOLVER_TAG" || true
 }
@@ -427,7 +454,7 @@ ensure_route_default_resolver() {
       '.route.default_domain_resolver == $tag' "$CONFIG_FILE" >/dev/null 2>&1; then
     return 0
   fi
-  atomic_json_update "$CONFIG_FILE" '
+  atomic_config_update_checked '
     .route = ((.route // {}) | .rules = (.rules // []) | .final = (.final // "direct")
               | .default_domain_resolver = $tag)
   ' --arg tag "$SB_DNS_RESOLVER_TAG" || true
@@ -459,10 +486,10 @@ ensure_direct_outbounds() {
     (if (.outbounds | any(.tag=="direct-dual")) then . else
       .outbounds += [{type:"direct", tag:"direct-dual", domain_resolver:{server:$tag, strategy:"prefer_ipv6"}}] end)
   ' "$CONFIG_FILE" > "$candidate"
-  if json_validate "$candidate"; then
+  if json_validate "$candidate" && sing-box check -c "$candidate" >>"$LOG_FILE" 2>&1; then
     atomic_install "$candidate" "$CONFIG_FILE" 600
   else
-    warn "自动补齐基础出站失败, 请运行 'sb diag' 或检查 ${CONFIG_FILE} 是否损坏。"
+    warn "自动补齐基础出站失败 (JSON 或 sing-box check 未通过), 请运行 'sb diag' 或检查 ${CONFIG_FILE} 是否损坏, 详见 ${LOG_FILE}。"
   fi
   rm -f "$candidate"
 }
