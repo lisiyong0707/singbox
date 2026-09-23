@@ -68,21 +68,37 @@ BLUE='\033[0;34m'; CYAN='\033[0;36m'; MAGENTA='\033[0;35m'; BOLD='\033[1m'; NC='
 
 # 计算字符串显示宽度 (按 Unicode 东亚宽度标准: 全角/宽字符算 2, 其余算 1), 用于菜单列对齐
 # 比手工判断字符范围更准确, 能正确处理中英文混排的情况
-_pad_display() {
-  local s=$1 target=$2
+# 自动按列计算最大显示宽度并对齐打印, 不需要再手动指定固定宽度数字
+# 用法: _print_menu_cols <每行列数> "第1项" "第2项" "第3项" ...
+_print_menu_cols() {
+  local ncols=$1; shift
   python3 -c "
 import sys, unicodedata
-s = sys.argv[1]
-target = int(sys.argv[2])
-width = 0
-for ch in s:
-    ea = unicodedata.east_asian_width(ch)
-    width += 2 if ea in ('W', 'F') else 1
-pad = target - width
-if pad < 1:
-    pad = 1
-sys.stdout.write(s + ' ' * pad)
-" "$s" "$target"
+
+def width(s):
+    w = 0
+    for ch in s:
+        ea = unicodedata.east_asian_width(ch)
+        w += 2 if ea in ('W', 'F') else 1
+    return w
+
+ncols = int(sys.argv[1])
+items = sys.argv[2:]
+
+# 按列位置分组, 分别算每一列里最宽的那一项 (而不是全部项统一一个宽度)
+col_max = [0] * ncols
+for i, it in enumerate(items):
+    c = i % ncols
+    col_max[c] = max(col_max[c], width(it))
+
+gap = 2  # 列与列之间额外留的间距
+for i, it in enumerate(items):
+    c = i % ncols
+    pad = col_max[c] - width(it) + gap
+    sys.stdout.write(it + ' ' * pad)
+    if c == ncols - 1 or i == len(items) - 1:
+        sys.stdout.write('\n')
+" "$ncols" "$@"
 }
 
 _log_raw() {
