@@ -451,9 +451,50 @@ ensure_dns_resolver() {
       '(.dns.servers // []) | any(.tag == $tag)' "$CONFIG_FILE" >/dev/null 2>&1; then
     return 0
   fi
-  atomic_config_update_checked '
+  atomic_json_update "$CONFIG_FILE" '
     .dns = ((.dns // {}) | .servers = ((.servers // []) + [{type:"udp", tag:$tag, server:"1.1.1.1"}]))
   ' --arg tag "$SB_DNS_RESOLVER_TAG" || true
+}
+
+ensure_route_default_resolver() {
+  if jq -e --arg tag "$SB_DNS_RESOLVER_TAG" \
+      '.route.default_domain_resolver == $tag' "$CONFIG_FILE" >/dev/null 2>&1; then
+    return 0
+  fi
+  atomic_json_update "$CONFIG_FILE" '
+    .route = ((.route // {}) | .rules = (.rules // []) | .final = (.final // "direct")
+              | .default_domain_resolver = $tag)
+  ' --arg tag "$SB_DNS_RESOLVER_TAG" || true
+}
+
+ensure_direct_outbounds() {
+  local candidate
+  if jq -e --arg tag "$SB_DNS_RESOLVER_TAG" '
+      (.outbounds // []) as $o |
+      ($o | any(.tag=="direct")) and
+      ($o | any(.tag=="direct-v4" and .domain_resolver.server==$tag)) and
+      ($o | any(.tag=="direct-v6" and .domain_resolver.server==$tag)) and
+      ($o | any(.tag=="direct-dual" and .domain_resolver.server==$tag))
+    ' "$CONFIG_FILE" >/dev/null 2>&1; then
+    return 0
+  fi
+  candidate=$(mktemp)
+  jq --arg tag "$SB_DNS_RESOLVER_TAG" '
+    .outbounds = (.outbounds // []) |
+    (if (.outbounds | any(.tag=="direct")) then . else .outbounds += [{type:"direct", tag:"direct"}] end) |
+    (if (.outbounds | any(.tag=="direct-v4")) then . else
+      .outbounds += [{type:"direct", tag:"direct-v4", domain_resolver:{server:$tag, strategy:"ipv4_only"}}] end) |
+    (if (.outbounds | any(.tag=="direct-v6")) then . else
+      .outbounds += [{type:"direct", tag:"direct-v6", domain_resolver:{server:$tag, strategy:"ipv6_only"}}] end) |
+    (if (.outbounds | any(.tag=="direct-dual")) then . else
+      .outbounds += [{type:"direct", tag:"direct-dual", domain_resolver:{server:$tag, strategy:"prefer_ipv6"}}] end)
+  ' "$CONFIG_FILE" > "$candidate"
+  if json_validate "$candidate"; then
+    atomic_install "$candidate" "$CONFIG_FILE" 600
+  else
+    warn "自动补齐基础出站失败, 请运行 'sb diag' 或检查 ${CONFIG_FILE} 是否损坏。"
+  fi
+  rm -f "$candidate"
 }
 
 # create_base_config() 只在 config.json 完全不存在时才会写入 route.default_domain_resolver,
