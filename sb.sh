@@ -3113,6 +3113,80 @@ purge_all() {
 
   ok "彻底清除完成。云厂商安全组规则 (如有) 本脚本管不到, 仍需自行去控制台清理。"
 }
+node_management_menu() {
+  local choice
+  while true; do
+    title "节点管理"
+    printf '  1) 查看客户端连接串\n'
+    printf '  2) 查看节点二维码\n'
+    printf '  3) 删除入站节点 (联动清理分流路由)\n'
+    printf '  4) 编辑节点 (改名/端口/地址/域名)\n'
+    printf '  0) 返回主菜单\n'
+    read -r -p '请选择: ' choice
+    case $choice in
+      1) show_connections ;;
+      2) show_connection_qrcode ;;
+      3) remove_inbound ;;
+      4) node_edit_menu ;;
+      0) return 0 ;;
+      *) warn "无效的编号选择。" ;;
+    esac
+  done
+}
+
+diag_ops_menu() {
+  local choice
+  while true; do
+    title "诊断与运维"
+    printf '  1) 查看服务状态与网络栈\n'
+    printf '  2) 查看实时运行日志\n'
+    printf '  3) 校验配置并重启服务\n'
+    printf '  4) 系统健康检查\n'
+    printf '  5) 系统诊断 (端口/DNS/BBR/防火墙/Tunnel/配置)\n'
+    printf '  6) 检查并修复孤儿节点 (reconcile)\n'
+    printf '  0) 返回主菜单\n'
+    read -r -p '请选择: ' choice
+    case $choice in
+      1) show_status ;;
+      2) show_logs ;;
+      3) validate_and_restart ;;
+      4) health_check ;;
+      5) run_diagnostics ;;
+      6) reconcile_nodes ;;
+      0) return 0 ;;
+      *) warn "无效的编号选择。" ;;
+    esac
+  done
+}
+
+system_maintenance_menu() {
+  local choice
+  while true; do
+    title "系统维护"
+    printf '  1) 证书管理\n'
+    printf '  2) 启用 BBR 拥塞控制\n'
+    printf '  3) 恢复最近一次配置备份\n'
+    printf '  4) 安装 / 修复官方 sing-box 环境\n'
+    printf '  5) 更新 sing-box 核心\n'
+    printf '  6) 从 GitHub 更新本脚本\n'
+    printf '  7) 卸载 sing-box (保留配置/数据)\n'
+    printf '  8) 彻底清除 (软件包+配置+证书+防火墙, 不可逆)\n'
+    printf '  0) 返回主菜单\n'
+    read -r -p '请选择: ' choice
+    case $choice in
+      1) cert_management_menu ;;
+      2) enable_bbr ;;
+      3) restore_backup ;;
+      4) install_sing_box ;;
+      5) upgrade_sing_box ;;
+      6) update_manager ;;
+      7) uninstall_sing_box ;;
+      8) purge_all ;;
+      0) return 0 ;;
+      *) warn "无效的编号选择。" ;;
+    esac
+  done
+}
 
 # ===========================================================================
 # 菜单交互
@@ -3146,25 +3220,9 @@ print_menu() {
     printf " ${CYAN}[订阅/WARP/测速]${NC}\n"
     printf ' 13) 订阅系统管理        14) Cloudflare WARP     15) 服务器测速\n\n'
     printf " ${MAGENTA}[管理与运维]${NC}\n"
-    _print_menu_cols 3 \
-      "16) 连接串 -查看已保存节点链接" \
-      "17) 二维码 -导出节点二维码" \
-      "18) 删除节点 -删除并清理分流路由" \
-      "19) 服务状态 -查看运行状态/网络栈" \
-      "20) 运行日志 -查看实时运行日志" \
-      "21) 校验重启 -校验配置并重启服务" \
-      "22) 健康检查 -检测配置/服务/WARP" \
-      "23) 系统诊断 -端口/DNS/防火墙/证书" \
-      "24) 证书管理 -查看/续期/申请证书" \
-      "25) 启用BBR -开启BBR拥塞控制" \
-      "26) 恢复备份 -回滚到最近可用配置" \
-      "27) 修复环境 -重装/修复sing-box" \
-      "28) 更新核心 -升级sing-box核心版本" \
-      "29) 更新脚本 -从GitHub拉取新版脚本" \
-      "30) 卸载 -卸载sing-box保留数据" \
-      "31) 编辑节点 -改名/端口/地址/域名" \
-      "32) reconcile -修复孤儿节点/防火墙" \
-      "33) 彻底清除 -软件包+配置+证书+防火墙(不可逆)"
+    printf '  16) 节点管理 -连接串/二维码/删除/编辑\n'
+    printf '  17) 诊断与运维 -状态/日志/校验/健康/诊断/reconcile\n'
+    printf '  18) 系统维护 -证书/BBR/备份/安装/更新/卸载/彻底清除\n'
     printf '\n'
   else
     # 窄终端 (<100列): 回退到原始单列, 避免自动换行把布局搞乱
@@ -3188,13 +3246,9 @@ print_menu() {
     printf ' 14) Cloudflare WARP 管理\n'
     printf ' 15) 服务器测速\n\n'
     printf " ${MAGENTA}[管理与运维]${NC}\n"
-    printf ' 16) 查看客户端连接串\n  17) 查看节点二维码\n  18) 删除入站节点 (联动清理分流路由)\n'
-    printf ' 19) 查看服务状态与网络栈情况\n  20) 查看实时运行日志\n  21) 校验配置并重启服务\n'
-    printf ' 22) 系统健康检查\n  23) 系统诊断 (端口/DNS/BBR/防火墙/Tunnel/配置)\n  24) 证书管理\n'
-    printf ' 25) 启用 BBR 拥塞控制\n  26) 恢复最近一次配置备份\n  27) 安装 / 修复官方 sing-box 环境\n'
-    printf ' 28) 更新 sing-box 核心\n  29) 从 GitHub 更新本脚本\n  30) 卸载 sing-box\n'
-    printf ' 31) 编辑节点 (改名 / 改端口 / 改地址 / 改域名)\n  32) 检查并修复孤儿节点 (reconcile)\n'
-    printf ' 33) 彻底清除 (卸载软件包+删配置+删证书+清防火墙, 不可逆)\n'
+    printf ' 16) 节点管理 (连接串/二维码/删除/编辑)\n'
+    printf ' 17) 诊断与运维 (状态/日志/校验/健康/诊断/reconcile)\n'
+    printf ' 18) 系统维护 (证书/BBR/备份/安装/更新/卸载/彻底清除)\n'
   fi
   printf '\n  0) 退出\n\n'
 }
@@ -3219,24 +3273,9 @@ menu() {
       13) subscription_menu ;;
       14) warp_menu ;;
       15) run_speedtest ;;
-      16) show_connections ;;
-      17) show_connection_qrcode ;;
-      18) remove_inbound ;;
-      19) show_status ;;
-      20) show_logs ;;
-      21) validate_and_restart ;;
-      22) health_check ;;
-      23) run_diagnostics ;;
-      24) cert_management_menu ;;
-      25) enable_bbr ;;
-      26) restore_backup ;;
-      27) install_sing_box ;;
-      28) upgrade_sing_box ;;
-      29) update_manager ;;
-      30) uninstall_sing_box ;;
-      31) node_edit_menu ;;
-      32) reconcile_nodes ;;
-      33) purge_all ;;
+      16) node_management_menu ;;
+      17) diag_ops_menu ;;
+      18) system_maintenance_menu ;;
       0) exit 0 ;;
       *) warn "无效的编号选择。" ;;
     esac
