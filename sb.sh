@@ -3037,6 +3037,84 @@ uninstall_sing_box() {
 }
 
 # ===========================================================================
+# 彻底清除: 停服务 + 卸载软件包 + 删除配置/数据/证书/防火墙规则/APT源,
+# 比 uninstall_sing_box() 激进得多 (那个只卸载 sing-box 软件包本身, 配置和
+# 节点数据是故意保留的)。这里是"这台机器上再也不需要这个脚本管理的任何东西"
+# 场景下用的, 不可逆, 全程二次确认。
+# ===========================================================================
+purge_all() {
+  require_root
+  warn "即将彻底清除 sing-box-vps 管理的全部内容:"
+  printf '  - sing-box / cloudflared / cloudflare-warp / certbot 软件包\n'
+  printf '  - %s (配置)\n' "$CONFIG_DIR"
+  printf '  - %s (节点记录/订阅/备份/日志)\n' "$STATE_DIR"
+  printf '  - %s (Cloudflare Tunnel 配置)\n' "$CF_CONFIG_DIR"
+  printf '  - systemd unit / logrotate / cron / certbot 续期钩子\n'
+  printf '  - 本脚本自建的 APT 源与密钥\n'
+  printf '  - 本脚本开过的防火墙放行规则 (iptables/ip6tables/nftables)\n'
+  warn "此操作不可逆, 且不会创建任何备份。"
+  local confirm_text
+  read -r -p "请输入大写 DELETE 以确认继续: " confirm_text
+  [[ $confirm_text == DELETE ]] || { warn "输入不匹配, 已取消。"; return 0; }
+
+  info "停止并禁用相关服务..."
+  systemctl disable --now sing-box sing-box-vps-sub cloudflared warp-svc 2>/dev/null || true
+
+  info "卸载软件包 (sing-box / cloudflared / cloudflare-warp)..."
+  apt-get remove --purge -y sing-box cloudflared cloudflare-warp 2>/dev/null || true
+
+  if command -v certbot >/dev/null 2>&1; then
+    if confirm "是否一并卸载 certbot 并删除全部证书 (如果这台机器上 certbot 还给其他站点用, 选否)" N; then
+      apt-get remove --purge -y certbot 2>/dev/null || true
+      rm -rf /etc/letsencrypt/live /etc/letsencrypt/archive /etc/letsencrypt/renewal
+      rm -f /etc/letsencrypt/renewal-hooks/deploy/restart-sing-box
+      rm -f /etc/cron.d/sing-box-vps-certbot
+      systemctl disable --now certbot.timer 2>/dev/null || true
+    else
+      rm -f /etc/letsencrypt/renewal-hooks/deploy/restart-sing-box
+      info "已跳过 certbot/证书清理, 仅移除了本脚本的续期钩子。"
+    fi
+  fi
+  apt-get autoremove -y 2>/dev/null || true
+
+  info "删除脚本自身与快捷命令..."
+  rm -f "$MANAGER_PATH" "$SHORTCUT_PATH"
+
+  info "删除配置/数据/日志目录..."
+  rm -rf "$CONFIG_DIR" "$STATE_DIR" "$CF_CONFIG_DIR"
+  rm -rf /root/.cloudflared "${HOME}/.cloudflared" 2>/dev/null || true
+  rm -f "$LOCK_FILE"
+
+  info "删除 systemd unit..."
+  rm -f /etc/systemd/system/cloudflared.service "$SUB_HTTPD_UNIT"
+  systemctl daemon-reload
+
+  info "删除 logrotate 配置..."
+  rm -f "$LOGROTATE_FILE"
+
+  info "删除脚本自建的 APT 源与密钥..."
+  rm -f /etc/apt/sources.list.d/sagernet.sources
+  rm -f /etc/apt/sources.list.d/cloudflared.list
+  rm -f /etc/apt/sources.list.d/cloudflare-client.list
+  rm -f /etc/apt/keyrings/sagernet.asc
+  rm -f /usr/share/keyrings/cloudflare-public-v2.gpg
+  rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+  apt-get update -qq 2>/dev/null || true
+
+  if confirm "是否清空本脚本开过的防火墙规则 (会 flush iptables INPUT 链, 如果机器上还有其他服务依赖 iptables 规则, 选否改成手动清理)" N; then
+    iptables -F INPUT 2>/dev/null || true
+    ip6tables -F INPUT 2>/dev/null || true
+    nft delete table inet "$NFT_TABLE" 2>/dev/null || true
+    persist_iptables_rules
+    ok "防火墙规则已清空。"
+  else
+    warn "已跳过防火墙清理, 请自行用 'iptables -L INPUT -n --line-numbers' 检查并手动删除本脚本开过的规则。"
+  fi
+
+  ok "彻底清除完成。云厂商安全组规则 (如有) 本脚本管不到, 仍需自行去控制台清理。"
+}
+
+# ===========================================================================
 # 菜单交互
 # ===========================================================================
 print_menu() {
@@ -3085,7 +3163,8 @@ print_menu() {
       "29) 更新脚本 -从GitHub拉取新版脚本" \
       "30) 卸载 -卸载sing-box保留数据" \
       "31) 编辑节点 -改名/端口/地址/域名" \
-      "32) reconcile -修复孤儿节点/防火墙"
+      "32) reconcile -修复孤儿节点/防火墙" \
+      "33) 彻底清除 -软件包+配置+证书+防火墙(不可逆)"
     printf '\n'
   else
     # 窄终端 (<100列): 回退到原始单列, 避免自动换行把布局搞乱
@@ -3115,6 +3194,7 @@ print_menu() {
     printf ' 25) 启用 BBR 拥塞控制\n  26) 恢复最近一次配置备份\n  27) 安装 / 修复官方 sing-box 环境\n'
     printf ' 28) 更新 sing-box 核心\n  29) 从 GitHub 更新本脚本\n  30) 卸载 sing-box\n'
     printf ' 31) 编辑节点 (改名 / 改端口 / 改地址 / 改域名)\n  32) 检查并修复孤儿节点 (reconcile)\n'
+    printf ' 33) 彻底清除 (卸载软件包+删配置+删证书+清防火墙, 不可逆)\n'
   fi
   printf '\n  0) 退出\n\n'
 }
@@ -3156,6 +3236,7 @@ menu() {
       30) uninstall_sing_box ;;
       31) node_edit_menu ;;
       32) reconcile_nodes ;;
+      33) purge_all ;;
       0) exit 0 ;;
       *) warn "无效的编号选择。" ;;
     esac
@@ -3197,6 +3278,7 @@ usage() {
   self-update     从 GitHub 更新本脚本
   edit            编辑节点 (改名/端口/地址/域名)
   uninstall       卸载 sing-box
+  purge           彻底清除 (软件包+配置+证书+防火墙规则, 不可逆, 需二次确认)
 EOF
 }
 
@@ -3248,6 +3330,7 @@ main() {
     rollback) restore_backup ;;
     remove) remove_inbound ;;
     uninstall) uninstall_sing_box ;;
+    purge) purge_all ;;
     edit) node_edit_menu ;;
     reconcile) reconcile_nodes ;;
     *) usage; exit 1 ;;
