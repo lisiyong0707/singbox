@@ -66,6 +66,23 @@ readonly REALITY_PRESET_DOMAINS=(
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; MAGENTA='\033[0;35m'; BOLD='\033[1m'; NC='\033[0m'
 
+# 计算字符串显示宽度 (中文全角按 2 算, 英文数字符号按 1 算), 用于菜单列对齐
+_pad_display() {
+  local s=$1 target=$2 i ch width=0
+  local len=${#s}
+  for (( i=0; i<len; i++ )); do
+    ch=${s:i:1}
+    if [[ $ch > $'\u1100' ]]; then
+      width=$((width+2))
+    else
+      width=$((width+1))
+    fi
+  done
+  local pad=$((target-width))
+  (( pad < 1 )) && pad=1
+  printf '%s%*s' "$s" "$pad" ''
+}
+
 _log_raw() {
   # 日志文件不含颜色转义, 便于后续 grep/诊断
   [[ -d $STATE_DIR ]] || install -d -m 700 "$STATE_DIR" 2>/dev/null || return 0
@@ -2994,13 +3011,44 @@ print_menu() {
     printf '  8) Trojan + TLS        10) Hysteria2 + TLS     12) AnyTLS + TLS\n\n'
     printf " ${CYAN}[订阅/WARP/测速]${NC}\n"
     printf ' 13) 订阅系统管理        14) Cloudflare WARP     15) 服务器测速\n\n'
-    printf " ${MAGENTA}[管理与运维]${NC}\n"
-    printf '  16) 连接串   -查看已保存节点链接    19) 服务状态 -查看运行状态/网络栈    22) 健康检查 -检测配置/服务/WARP\n'
-    printf '  17) 二维码   -导出节点二维码        20) 运行日志 -查看实时运行日志        23) 系统诊断 -端口/DNS/防火墙/证书\n'
-    printf '  18) 删除节点 -删除并清理分流路由    21) 校验重启 -校验配置并重启服务      24) 证书管理 -查看/续期/申请证书\n\n'
-    printf '  25) 启用BBR  -开启BBR拥塞控制       28) 更新核心 -升级sing-box核心版本    31) 编辑节点 -改名/端口/地址/域名\n'
-    printf '  26) 恢复备份 -回滚到最近可用配置    29) 更新脚本 -从GitHub拉取新版脚本    32) reconcile-修复孤儿节点/防火墙\n'
-    printf '  27) 修复环境 -重装/修复sing-box     30) 卸载    -卸载sing-box保留数据\n'
+       printf " ${MAGENTA}[管理与运维]${NC}\n"
+    local -a ops_a=(
+      "16) 连接串 -查看已保存节点链接"
+      "19) 服务状态 -查看运行状态/网络栈"
+      "22) 健康检查 -检测配置/服务/WARP"
+      "17) 二维码 -导出节点二维码"
+      "20) 运行日志 -查看实时运行日志"
+      "23) 系统诊断 -端口/DNS/防火墙/证书"
+      "18) 删除节点 -删除并清理分流路由"
+      "21) 校验重启 -校验配置并重启服务"
+      "24) 证书管理 -查看/续期/申请证书"
+    )
+    local col=0 item
+    for item in "${ops_a[@]}"; do
+      _pad_display "$item" 34
+      col=$((col+1))
+      (( col % 3 == 0 )) && printf '\n'
+    done
+    printf '\n'
+
+    local -a ops_b=(
+      "25) 启用BBR -开启BBR拥塞控制"
+      "28) 更新核心 -升级sing-box核心版本"
+      "31) 编辑节点 -改名/端口/地址/域名"
+      "26) 恢复备份 -回滚到最近可用配置"
+      "29) 更新脚本 -从GitHub拉取新版脚本"
+      "32) reconcile -修复孤儿节点/防火墙"
+      "27) 修复环境 -重装/修复sing-box"
+      "30) 卸载 -卸载sing-box保留数据"
+      ""
+    )
+    col=0
+    for item in "${ops_b[@]}"; do
+      _pad_display "$item" 34
+      col=$((col+1))
+      (( col % 3 == 0 )) && printf '\n'
+    done
+    printf '\n'
   else
     # 窄终端 (<100列): 回退到原始单列, 避免自动换行把布局搞乱
     printf " ${GREEN}[VLESS Reality 专项节点]${NC}\n"
