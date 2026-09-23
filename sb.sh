@@ -316,6 +316,27 @@ detect_public_ipv6() {
   return 0
 }
 
+readonly IP_CACHE_FILE="${STATE_DIR}/ip_cache"
+
+# 缓存公网 IPv4/IPv6, 300 秒内复用, 避免菜单每次重绘都发起网络请求
+get_cached_public_ips() {
+  local now cached_time v4 v6
+  now=$(date +%s)
+  if [[ -f $IP_CACHE_FILE ]]; then
+    cached_time=$(sed -n '1p' "$IP_CACHE_FILE" 2>/dev/null)
+    if [[ $cached_time =~ ^[0-9]+$ ]] && (( now - cached_time < 300 )); then
+      v4=$(sed -n '2p' "$IP_CACHE_FILE")
+      v6=$(sed -n '3p' "$IP_CACHE_FILE")
+      printf '%s|%s' "$v4" "$v6"
+      return 0
+    fi
+  fi
+  v4=$(detect_public_ip || true)
+  v6=$(detect_public_ipv6 || true)
+  { printf '%s\n%s\n%s\n' "$now" "$v4" "$v6"; } > "$IP_CACHE_FILE" 2>/dev/null || true
+  printf '%s|%s' "$v4" "$v6"
+}
+
 format_host_uri() {
   local host=$1
   if [[ $host == *:* && $host != \[*\] ]]; then
@@ -2945,15 +2966,21 @@ uninstall_sing_box() {
 # ===========================================================================
 print_menu() {
   local v4_tag="[无IPv4]" v6_tag="[无IPv6]"
-  check_ipv4_egress && v4_tag="[IPv4正常]"
-  check_ipv6_egress && v6_tag="[IPv6正常]"
+  local ips v4ip v6ip
+  if check_ipv4_egress; then
+    ips=$(get_cached_public_ips); v4ip=${ips%%|*}
+    v4_tag="[IPv4: ${v4ip:-正常}]"
+  fi
+  if check_ipv6_egress; then
+    ips=$(get_cached_public_ips); v6ip=${ips#*|}
+    v6_tag="[IPv6: ${v6ip:-正常}]"
+  fi
   local cols
   cols=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}
 
-  printf '\n%s\n' '════════════════════════════════════════════════════════════════════════════'
+  printf '\n%s\n' '══════════════════════════════════════════════════════════════════════════'
   printf ' singbox VPS 小李的双栈智能管理 v%s  %s %s\n' "$SCRIPT_VERSION" "$v4_tag" "$v6_tag"
-  printf '%s\n' '════════════════════════════════════════════════════════════════════════════'
-
+  printf '%s\n' '  ══════════════════════════════════════════════════════════════════════════'
   if (( cols >= 100 )); then
     # 宽终端 (>=100列): 三列紧凑布局, 一屏显示完
     printf " ${GREEN}[Reality 专项]${NC}\n"
