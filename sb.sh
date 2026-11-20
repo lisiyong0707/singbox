@@ -1448,6 +1448,56 @@ deploy_anytls() {
   print_result_block "AnyTLS" "$uri" "$D_TAG"
 }
 
+# Newer sing-box features require a hard version gate.
+require_sb_feature_version() {
+  local need=$1 feature=$2 have
+  have=$(sing-box version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+  [[ -n $have ]] || die "无法获取 sing-box 版本号, 请先运行 'sb check'。"
+  version_ge "$have" "$need" || die "${feature}需要 sing-box >= ${need}, 当前为 ${have}; 请运行 'sb upgrade'。"
+}
+
+ask_snell_version() {
+  local choice
+  printf '\n选择 Snell 协议版本:\n  1) v6 (推荐)\n  2) v5 (兼容旧客户端)\n' >&2
+  read -r -p '请选择 [1]: ' choice
+  choice=${choice:-1}
+  [[ $choice == 2 ]] && printf '5' || printf '6'
+}
+
+deploy_naive() {
+  ensure_installed
+  deploy_prepare_tls_domain 443 "naive" || return 0
+  local paths cert key username password tls inbound uri flag node_name
+  paths=$(obtain_tls_paths "$D_HOST"); cert=${paths%%|*}; key=${paths#*|}
+  username=user; password=$(random_token); node_name=$(ask_node_name "Naive-${D_MODE}")
+  tls=$(tls_json "$D_HOST" "$cert" "$key")
+  inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg username "$username" --arg password "$password" --argjson tls "$tls" '{type:"naive",tag:$tag,listen:$listen,listen_port:$port,users:[{username:$username,password:$password}],tls:$tls}')
+  apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
+  flag=$(get_server_flag); uri="naive+https://${username}:${password}@${D_FORMATTED_HOST}:${D_PORT}?padding=true#${flag}%20${node_name}"
+  save_connection "naive-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
+  open_firewall_port "$D_PORT" tcp; open_firewall_port "$D_PORT" udp
+  ok "NaiveProxy (${D_MODE}) 已部署"; print_result_block "NaiveProxy" "$uri" "$D_TAG"
+}
+
+deploy_snell() {
+  ensure_installed
+  require_sb_feature_version "1.14.0" "Snell 协议"
+  deploy_prepare_common "Snell 监听端口" 8388 "snell" || return 0
+  local version psk inbound uri uri_query flag node_name
+  version=$(ask_snell_version); psk=$(random_token); node_name=$(ask_node_name "Snell-${D_MODE}")
+  if [[ $version == 6 ]]; then
+    inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg psk "$psk" '{type:"snell",tag:$tag,listen:$listen,listen_port:$port,version:6,psk:$psk,mode:"default"}')
+  else
+    inbound=$(jq -n --arg tag "$D_TAG" --arg listen "$D_LISTEN" --argjson port "$D_PORT" --arg psk "$psk" '{type:"snell",tag:$tag,listen:$listen,listen_port:$port,version:5,psk:$psk,obfs_mode:"none"}')
+  fi
+  apply_inbound_with_route "$inbound" "$D_TAG" "$D_OUTBOUND"
+  flag=$(get_server_flag); uri_query="psk=${psk}&version=${version}"
+  uri="snell://${D_FORMATTED_HOST}:${D_PORT}?${uri_query}#${flag}%20${node_name}"
+  save_connection "snell-v${version}-${D_MODE}" "$D_TAG" "$D_HOST" "$D_PORT" "$uri"
+  open_firewall_port "$D_PORT" tcp
+  ok "Snell v${version} (${D_MODE}) 已部署"; print_result_block "Snell v${version}" "$uri" "$D_TAG"
+}
+
 # ===========================================================================
 # Cloudflare Tunnel (config.yml + ingress, 而非仅 quick "service install")
 # ===========================================================================
@@ -2209,6 +2259,17 @@ uri_to_singbox_outbound() {
   tag=$(printf '%s' "$uri" | sed -n 's/.*#\(.*\)$/\1/p')
   tag=$(python3 -c "import urllib.parse,sys; print(urllib.parse.unquote(sys.argv[1]))" "${tag:-node}" 2>/dev/null || printf '%s' "${tag:-node}")
   case "$scheme" in
+    snell)
+      local hostport query host port psk version
+      hostport=${rest%%\?*}; query=${rest#*\?}; query=${query%%#*}; host=${hostport%:*}; port=${hostport##*:}
+      psk=$(printf '%s' "$query" | grep -oE 'psk=[^&]*' | cut -d= -f2); version=$(printf '%s' "$query" | grep -oE 'version=[^&]*' | cut -d= -f2); [[ $version == 5 ]] && version=4
+      jq -n --arg tag "$tag" --arg host "$host" --argjson port "${port:-8388}" --arg psk "$psk" --argjson version "${version:-6}" '{type:"snell",tag:$tag,server:$host,server_port:$port,version:$version,psk:$psk} + (if $version == 6 then {mode:"default"} else {obfs_mode:"none"} end)' 2>/dev/null
+      ;;
+    "naive+https")
+      local userinfo hostport username password host port
+      userinfo=${rest%%@*}; rest=${rest#*@}; hostport=${rest%%\?*}; host=${hostport%:*}; port=${hostport##*:}; username=${userinfo%%:*}; password=${userinfo#*:}
+      jq -n --arg tag "$tag" --arg host "$host" --argjson port "${port:-443}" --arg username "$username" --arg password "$password" '{type:"naive",tag:$tag,server:$host,server_port:$port,username:$username,password:$password,network:"tcp",tls:{enabled:true,server_name:$host}}' 2>/dev/null
+      ;;
     vless)
       local userinfo hostport query uuid host port sni pbk sid flow security stype svc path
       userinfo=${rest%%@*}; rest=${rest#*@}
@@ -2283,7 +2344,18 @@ uri_to_singbox_outbound() {
         '{type:"tuic", tag:$tag, server:$host, server_port:$port, uuid:$uuid, password:$password,
           congestion_control:"bbr", tls:{enabled:true, server_name:$sni}}' 2>/dev/null
       ;;
-          anytls)
+    snell)
+      local hostport query host port psk version
+      hostport=${rest%%\?*}; query=${rest#*\?}; query=${query%%#*}; host=${hostport%:*}; port=${hostport##*:}
+      psk=$(printf '%s' "$query" | grep -oE 'psk=[^&]*' | cut -d= -f2); version=$(printf '%s' "$query" | grep -oE 'version=[^&]*' | cut -d= -f2); [[ $version == 5 ]] && version=4
+      jq -n --arg tag "$tag" --arg host "$host" --argjson port "${port:-8388}" --arg psk "$psk" --argjson version "${version:-6}" '{type:"snell",tag:$tag,server:$host,server_port:$port,version:$version,psk:$psk} + (if $version == 6 then {mode:"default"} else {obfs_mode:"none"} end)' 2>/dev/null
+      ;;
+    "naive+https")
+      local userinfo hostport username password host port
+      userinfo=${rest%%@*}; rest=${rest#*@}; hostport=${rest%%\?*}; host=${hostport%:*}; port=${hostport##*:}; username=${userinfo%%:*}; password=${userinfo#*:}
+      jq -n --arg tag "$tag" --arg host "$host" --argjson port "${port:-443}" --arg username "$username" --arg password "$password" '{type:"naive",tag:$tag,server:$host,server_port:$port,username:$username,password:$password,network:"tcp",tls:{enabled:true,server_name:$host}}' 2>/dev/null
+      ;;
+    anytls)
       local password hostport query host port sni
       password=${rest%%@*}; rest=${rest#*@}
       hostport=${rest%%\?*}; query=${rest#*\?}; query=${query%%#*}
@@ -2334,6 +2406,17 @@ clash_proxy_yaml_from_uri() {
   name=$(printf '%s' "$uri" | sed -n 's/.*#\(.*\)$/\1/p')
   name=$(python3 -c "import urllib.parse,sys; print(urllib.parse.unquote(sys.argv[1]))" "${name:-node}" 2>/dev/null || printf '%s' "${name:-node}")
   case "$scheme" in
+    snell)
+      local hostport query host port psk version
+      hostport=${rest%%\?*}; query=${rest#*\?}; query=${query%%#*}; host=${hostport%:*}; port=${hostport##*:}
+      psk=$(printf '%s' "$query" | grep -oE 'psk=[^&]*' | cut -d= -f2); version=$(printf '%s' "$query" | grep -oE 'version=[^&]*' | cut -d= -f2)
+      printf '  - name: "%s"\n    type: snell\n    server: %s\n    port: %s\n    psk: "%s"\n    version: %s\n' "$name" "$host" "$port" "$psk" "${version:-6}"
+      ;;
+    "naive+https")
+      local userinfo hostport host port username password
+      userinfo=${rest%%@*}; rest=${rest#*@}; hostport=${rest%%\?*}; hostport=${hostport%%#*}; host=${hostport%:*}; port=${hostport##*:}; username=${userinfo%%:*}; password=${userinfo#*:}
+      printf '  - name: "%s"\n    type: naive\n    server: %s\n    port: %s\n    username: "%s"\n    password: "%s"\n' "$name" "$host" "$port" "$username" "$password"
+      ;;
     vless)
       local userinfo hostport query uuid host port sni pbk sid flow security stype svc path host_hdr
       userinfo=${rest%%@*}; rest=${rest#*@}
@@ -2400,6 +2483,17 @@ clash_proxy_yaml_from_uri() {
       printf '  - name: "%s"\n    type: tuic\n    server: %s\n    port: %s\n    uuid: %s\n    password: "%s"\n    sni: %s\n    congestion-controller: bbr\n' \
         "$name" "$host" "$port" "$uuid" "$password" "$sni"
       ;;
+          snell)
+            local hostport query host port psk version
+            hostport=${rest%%\?*}; query=${rest#*\?}; query=${query%%#*}; host=${hostport%:*}; port=${hostport##*:}
+            psk=$(printf '%s' "$query" | grep -oE 'psk=[^&]*' | cut -d= -f2); version=$(printf '%s' "$query" | grep -oE 'version=[^&]*' | cut -d= -f2)
+            printf '  - name: "%s"\n    type: snell\n    server: %s\n    port: %s\n    psk: "%s"\n    version: %s\n' "$name" "$host" "$port" "$psk" "${version:-6}"
+            ;;
+          "naive+https")
+            local userinfo hostport host port username password
+            userinfo=${rest%%@*}; rest=${rest#*@}; hostport=${rest%%\?*}; hostport=${hostport%%#*}; host=${hostport%:*}; port=${hostport##*:}; username=${userinfo%%:*}; password=${userinfo#*:}
+            printf '  - name: "%s"\n    type: naive\n    server: %s\n    port: %s\n    username: "%s"\n    password: "%s"\n' "$name" "$host" "$port" "$username" "$password"
+            ;;
           anytls)
       local password hostport query host port sni
       password=${rest%%@*}; rest=${rest#*@}
@@ -2659,10 +2753,13 @@ remove_inbound() {
 # 但 reconcile 阶段可能连 connections.json 记录都还没有, 所以单独按
 # config 里的 .type 做一次判断
 _inbound_protocols() {
+  _proto_fw_protocols "$1"
+}
+_proto_fw_protocols() {
   case "$1" in
     hysteria2*|tuic*) printf 'udp\n' ;;
-    shadowsocks*)     printf 'tcp\nudp\n' ;;
-    *)                printf 'tcp\n' ;;
+    shadowsocks*|naive*) printf 'tcp\nudp\n' ;;
+    *) printf 'tcp\n' ;;
   esac
 }
 
@@ -2818,11 +2915,7 @@ rename_node() {
 
 # 按协议类型返回需要放行的传输层协议
 _type_protocols() {
-  case "$1" in
-    hysteria2*|tuic*) printf 'udp\n' ;;
-    shadowsocks*)     printf 'tcp\nudp\n' ;;
-    *)                printf 'tcp\n' ;;
-  esac
+  _proto_fw_protocols "$1"
 }
 
 change_node_port() {
@@ -2913,7 +3006,7 @@ change_tls_domain() {
   tag=$(pick_connection_tag) || return 0
   type=$(_conn_field "$tag" type)
   case $type in
-    trojan*|vless-tls*|hysteria2*|tuic*|anytls*) ;;
+      trojan*|vless-tls*|hysteria2*|tuic*|anytls*|naive*) ;;
     *) warn "该节点不是 TLS 证书类节点。"; return 0 ;;
   esac
   old_dom=$(jq -r --arg t "$tag" '.inbounds[]|select(.tag==$t)|.tls.server_name // empty' "$CONFIG_FILE")
@@ -3257,13 +3350,14 @@ print_menu() {
     printf '  4) Reality gRPC         5) ShadowTLS+SS2022     6) Cloudflare Tunnel 管理\n\n'
     printf " ${BLUE}[经典协议入站]${NC}\n"
     printf '  7) Shadowsocks 2022     9) VLESS + TLS         11) TUIC v5\n'
-    printf '  8) Trojan + TLS        10) Hysteria2 + TLS     12) AnyTLS + TLS\n\n'
+    printf '  8) Trojan + TLS        10) Hysteria2 + TLS     12) AnyTLS + TLS\n'
+    printf ' 13) NaiveProxy          14) Snell\n\n'
     printf " ${CYAN}[订阅/WARP/测速]${NC}\n"
-    printf ' 13) 订阅系统管理        14) Cloudflare WARP     15) 服务器测速\n\n'
+    printf ' 15) 订阅系统管理        16) Cloudflare WARP     17) 服务器测速\n\n'
     printf " ${MAGENTA}[管理与运维]${NC}\n"
-    printf '  16) 节点管理 -连接串/二维码/删除/编辑\n'
-    printf '  17) 诊断与运维 -状态/日志/校验/健康/诊断/reconcile\n'
-    printf '  18) 系统维护 -证书/BBR/备份/安装/更新/卸载/彻底清除\n'
+    printf '  18) 节点管理 -连接串/二维码/删除/编辑\n'
+    printf '  19) 诊断与运维 -状态/日志/校验/健康/诊断/reconcile\n'
+    printf '  20) 系统维护 -证书/BBR/备份/安装/更新/卸载/彻底清除\n'
     printf '\n'
   else
     # 窄终端 (<100列): 回退到原始单列, 避免自动换行把布局搞乱
@@ -3282,14 +3376,16 @@ print_menu() {
     printf ' 10) 新建 Hysteria2 + TLS 入站\n'
     printf ' 11) 新建 TUIC v5 入站\n'
     printf ' 12) 新建 AnyTLS + TLS 入站\n\n'
+    printf ' 13) 新建 NaiveProxy 入站 (HTTPS 伪装, 抗封锁)\n'
+    printf ' 14) 新建 Snell 入站 (Surge 私有协议, v5/v6 可选)\n\n'
     printf " ${CYAN}[订阅 / WARP / 测速]${NC}\n"
-    printf ' 13) 订阅系统管理\n'
-    printf ' 14) Cloudflare WARP 管理\n'
-    printf ' 15) 服务器测速\n\n'
+    printf ' 15) 订阅系统管理\n'
+    printf ' 16) Cloudflare WARP 管理\n'
+    printf ' 17) 服务器测速\n\n'
     printf " ${MAGENTA}[管理与运维]${NC}\n"
-    printf ' 16) 节点管理 (连接串/二维码/删除/编辑)\n'
-    printf ' 17) 诊断与运维 (状态/日志/校验/健康/诊断/reconcile)\n'
-    printf ' 18) 系统维护 (证书/BBR/备份/安装/更新/卸载/彻底清除)\n'
+    printf ' 18) 节点管理 (连接串/二维码/删除/编辑)\n'
+    printf ' 19) 诊断与运维 (状态/日志/校验/健康/诊断/reconcile)\n'
+    printf ' 20) 系统维护 (证书/BBR/备份/安装/更新/卸载/彻底清除)\n'
   fi
   printf '\n  0) 退出\n\n'
 }
@@ -3311,12 +3407,14 @@ menu() {
       10) deploy_hysteria2 ;;
       11) deploy_tuic ;;
       12) deploy_anytls ;;
-      13) subscription_menu ;;
-      14) warp_menu ;;
-      15) run_speedtest ;;
-      16) node_management_menu ;;
-      17) diag_ops_menu ;;
-      18) system_maintenance_menu ;;
+      13) deploy_naive ;;
+      14) deploy_snell ;;
+      15) subscription_menu ;;
+      16) warp_menu ;;
+      17) run_speedtest ;;
+      18) node_management_menu ;;
+      19) diag_ops_menu ;;
+      20) system_maintenance_menu ;;
       0) exit 0 ;;
       *) warn "无效的编号选择。" ;;
     esac
@@ -3338,6 +3436,8 @@ usage() {
   hy2             部署 Hysteria2
   tuic            部署 TUIC v5
   anytls          部署 AnyTLS
+  naive           部署 NaiveProxy
+  snell           部署 Snell (v5/v6)
   cftunnel        Cloudflare Tunnel 管理菜单
   warp            Cloudflare WARP 管理菜单
   sub             订阅系统管理菜单
@@ -3395,6 +3495,8 @@ main() {
     hy2) deploy_hysteria2 ;;
     tuic) deploy_tuic ;;
     anytls) deploy_anytls ;;
+    naive) deploy_naive ;;
+    snell) deploy_snell ;;
     status) show_status ;;
     links) show_connections ;;
     qrcode) show_connection_qrcode ;;
